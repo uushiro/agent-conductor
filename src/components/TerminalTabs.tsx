@@ -8,9 +8,13 @@ interface Tab {
   customIssue: boolean
 }
 
-export function TerminalTabs() {
+interface Props {
+  activeTabId: string
+  onActiveTabChange: (tabId: string) => void
+}
+
+export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
   const [tabs, setTabs] = useState<Tab[]>([])
-  const [activeTabId, setActiveTabId] = useState<string>('')
   const [editingTabId, setEditingTabId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const editInputRef = useRef<HTMLInputElement>(null)
@@ -45,19 +49,15 @@ export function TerminalTabs() {
       }
       setTabs(restored)
       const activeIdx = Math.min(session.activeIndex, restored.length - 1)
-      setActiveTabId(restored[activeIdx]?.id || restored[0]?.id || '')
+      onActiveTabChange(restored[activeIdx]?.id || restored[0]?.id || '')
 
-      // Auto-resume claude in tabs that had it running
-      if (claudeResumes.length > 0) {
+      // Auto-resume claude in tabs that had it running, staggered to ensure unique session tracking
+      claudeResumes.forEach(({ tabId, sessionId }, i) => {
         setTimeout(() => {
-          for (const { tabId, sessionId } of claudeResumes) {
-            const cmd = sessionId
-              ? `claude --resume ${sessionId}\r`
-              : 'claude --resume\r'
-            window.electronAPI.sendTerminalInput(tabId, cmd)
-          }
-        }, 1000)
-      }
+          const cmd = sessionId ? `claude --resume ${sessionId}\r` : 'claude\r'
+          window.electronAPI.sendTerminalInput(tabId, cmd)
+        }, 1000 + i * 1500)
+      })
     } else {
       createTab()
     }
@@ -99,12 +99,12 @@ export function TerminalTabs() {
       ...prev,
       { id: tabId, issue: '', detail: 'Terminal', customIssue: false },
     ])
-    setActiveTabId(tabId)
+    onActiveTabChange(tabId)
     // Auto-start Claude Code
     setTimeout(() => {
       window.electronAPI.sendTerminalInput(tabId, 'claude\r')
     }, 1000)
-  }, [])
+  }, [onActiveTabChange])
 
   const closeTab = useCallback(
     (tabId: string) => {
@@ -115,12 +115,12 @@ export function TerminalTabs() {
         window.electronAPI.closeTerminal(tabId)
         if (tabId === activeTabId) {
           const newIdx = Math.min(idx, updated.length - 1)
-          setActiveTabId(updated[newIdx].id)
+          onActiveTabChange(updated[newIdx].id)
         }
         return updated
       })
     },
-    [activeTabId]
+    [activeTabId, onActiveTabChange]
   )
 
   const startEditing = (tabId: string, currentIssue: string) => {
@@ -157,7 +157,7 @@ export function TerminalTabs() {
           <div
             key={tab.id}
             className={`tab ${tab.id === activeTabId ? 'tab-active' : ''} ${tab.issue ? 'tab-two-line' : ''}`}
-            onClick={() => setActiveTabId(tab.id)}
+            onClick={() => onActiveTabChange(tab.id)}
             onDoubleClick={() => startEditing(tab.id, tab.issue)}
           >
             {editingTabId === tab.id ? (

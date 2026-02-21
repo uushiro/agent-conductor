@@ -29,6 +29,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setTerminalIssue: (tabId: string, issue: string) =>
     ipcRenderer.invoke('terminal:set-issue', tabId, issue),
 
+  // Tab info (for sidebar)
+  listTerminalInfo: () =>
+    ipcRenderer.invoke('terminal:list-info') as Promise<
+      Array<{ id: string; cwd: string; proc: string; issue: string; latestInput: string; claudeSessionId: string | null; lastOutput: string; active: boolean }>
+    >,
+
   // Session persistence
   loadSession: () =>
     ipcRenderer.invoke('session:load') as Promise<{ tabs: Array<{ issue: string; cwd: string }>; activeIndex: number } | null>,

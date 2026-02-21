@@ -1,3 +1,14 @@
+export interface TabInfo {
+  id: string
+  cwd: string
+  proc: string
+  issue: string
+  latestInput: string
+  claudeSessionId: string | null
+  lastOutput: string
+  active: boolean
+}
+
 export interface SavedSession {
   tabs: Array<{ issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null }>
   activeIndex: number
@@ -11,6 +22,7 @@ export interface ElectronAPI {
   resizeTerminal: (tabId: string, cols: number, rows: number) => void
   getTerminalTitle: (tabId: string) => Promise<{ issue: string; detail: string }>
   setTerminalIssue: (tabId: string, issue: string) => Promise<void>
+  listTerminalInfo: () => Promise<TabInfo[]>
   loadSession: () => Promise<SavedSession | null>
   getGitBranch: () => Promise<string | null>
   getCwd: () => Promise<string>
