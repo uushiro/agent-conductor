@@ -39,6 +39,8 @@ const tabGeminiSessionWatchers = new Map<string, ReturnType<typeof setInterval>>
 // tabId → timestamp until which [[TASK:]] detection is suppressed (resume replay window)
 const tabTaskCooldown = new Map<string, number>()
 const TASK_RESUME_COOLDOWN_MS = 15000
+// tabId → unscanned tail buffer for [[TASK:]] detection (consumed on match to prevent re-detection)
+const tabTaskScanBuf = new Map<string, string>()
 
 // Strip ANSI/OSC escape codes and extract last meaningful line
 function extractLastLine(raw: string): string {
@@ -474,12 +476,17 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
     // Detect [[TASK: ...]] pattern — skip during resume replay cooldown
     const cooldownEnd = tabTaskCooldown.get(id) ?? 0
     if (Date.now() > cooldownEnd) {
-      const scanBuf = prev.slice(-100) + data
+      const overlap = tabTaskScanBuf.get(id) || ''
+      const scanBuf = overlap + data
       const stripped = scanBuf.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\r/g, '')
+      let lastMatchEnd = 0
       for (const match of stripped.matchAll(/\[\[TASK:\s*(.+?)\]\]/g)) {
         const title = match[1].trim()
         if (title) mainWindow?.webContents.send('task:add', title)
+        lastMatchEnd = match.index! + match[0].length
       }
+      // Keep only the unmatched tail for split-chunk detection (max 100 chars)
+      tabTaskScanBuf.set(id, stripped.slice(Math.max(lastMatchEnd, stripped.length - 100)))
     }
   })
 
@@ -631,6 +638,7 @@ function createWindow() {
     tabLastOutput.clear()
     tabLastOutputAt.clear()
     tabLastInputAt.clear()
+    tabTaskScanBuf.clear()
     for (const w of tabSessionWatchers.values()) clearInterval(w)
     tabSessionWatchers.clear()
     for (const w of tabGeminiSessionWatchers.values()) clearInterval(w)
@@ -673,6 +681,7 @@ function createWindow() {
     tabLastOutput.delete(tabId)
     tabLastOutputAt.delete(tabId)
     tabLastInputAt.delete(tabId)
+    tabTaskScanBuf.delete(tabId)
     const sw = tabSessionWatchers.get(tabId)
     if (sw) { clearInterval(sw); tabSessionWatchers.delete(tabId) }
     const idx = tabOrder.indexOf(tabId)

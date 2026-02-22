@@ -163,7 +163,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     return () => document.removeEventListener('mousedown', handler)
   }, [showAgentMenu])
 
-  // Escape cancels confirm dialog
+  // Escape cancels the close dialog (Enter is handled via Terminal onInterceptEnter)
   useEffect(() => {
     if (!confirmClose) return
     const handler = (e: KeyboardEvent) => {
@@ -461,7 +461,15 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       )}
       <div className="terminal-tabs-content">
         {tabs.map((tab) => (
-          <Terminal key={tab.id} tabId={tab.id} isActive={tab.id === activeTabId} />
+          <Terminal
+            key={tab.id}
+            tabId={tab.id}
+            isActive={tab.id === activeTabId}
+            onInterceptEnter={confirmClose && tab.id === activeTabId ? () => {
+              doCloseTab(confirmClose.tabId)
+              setConfirmClose(null)
+            } : undefined}
+          />
         ))}
       </div>
     </div>
