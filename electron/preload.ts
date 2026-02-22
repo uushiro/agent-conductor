@@ -35,6 +35,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
       Array<{ id: string; cwd: string; proc: string; issue: string; latestInput: string; claudeSessionId: string | null; lastOutput: string; active: boolean }>
     >,
 
+  // Close confirmation + restore history
+  getTabHasClaude: (tabId: string) =>
+    ipcRenderer.invoke('terminal:get-tab-has-claude', tabId) as Promise<boolean>,
+  getClosedHistory: () =>
+    ipcRenderer.invoke('terminal:get-closed-history') as Promise<Array<{ issue: string; cwd: string; claudeSessionId: string | null; closedAt: number }>>,
+  removeClosedHistory: (sessionId: string) => {
+    ipcRenderer.send('terminal:remove-closed-history', sessionId)
+  },
+
   // Session persistence
   loadSession: () =>
     ipcRenderer.invoke('session:load') as Promise<{ tabs: Array<{ issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null }>; activeIndex: number } | null>,

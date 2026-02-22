@@ -15,6 +15,14 @@ const SHELLS = new Set(['zsh', 'bash', 'fish', 'sh', 'login'])
 const ptyProcesses = new Map<string, ReturnType<typeof pty.spawn>>()
 const tabTimers = new Map<string, ReturnType<typeof setInterval>>()
 const tabInfo = new Map<string, { cwd: string; proc: string; issue: string; latestInput: string; claudeSessionId: string | null; claudeResumeParentId: string | null; hadClaude: boolean }>()
+
+interface ClosedTabEntry {
+  issue: string
+  cwd: string
+  claudeSessionId: string | null
+  closedAt: number
+}
+const closedTabsHistory: ClosedTabEntry[] = []
 const tabInputBuf = new Map<string, string>()
 const tabLastOutput = new Map<string, string>()
 const tabLastOutputAt = new Map<string, number>()
@@ -239,6 +247,62 @@ function getLastSessionText(sessionId: string | null, cwd: string): string {
   return ''
 }
 
+// Extract the current Claude action from PTY buffer.
+// Scans backward for tool calls (Bash, Read, Write, ...) or thinking indicators.
+// Falls back to 'Thinking...' if nothing useful is found.
+function extractClaudeAction(raw: string): string {
+  const stripped = raw
+    .replace(/\x1b\][^\x07\x1b]*\x07/g, '')
+    .replace(/\x1b\][^\x1b]*\x1b\\/g, '')
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+    .replace(/\x1b[a-zA-Z]/g, '')
+    .replace(/\r/g, '')
+
+  const lines = stripped.split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .filter((l) => !/^esc to interrupt/i.test(l))
+    .filter((l) => !/^\?.*shortcut/i.test(l))
+    .filter((l) => !/^ctrl\+/i.test(l))
+    .filter((l) => !/^[>›❯%$]\s*$/.test(l))
+    .filter((l) => !/^yuushirokawa@/.test(l))
+    .filter((l) => !/^\*?Worked for /i.test(l))
+
+  const TOOLS = [
+    'Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep',
+    'WebFetch', 'WebSearch', 'Task', 'NotebookEdit', 'TodoWrite', 'TodoRead', 'LS',
+  ]
+  // Match tool name anywhere in the line (Claude prefixes with ● or spinner chars)
+  const toolRegex = new RegExp(`(${TOOLS.join('|')}|mcp__[\\w]+)\\s*[\\[(]`)
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]
+
+    // Tool call: ToolName(args...) or ToolName[args...]
+    const toolMatch = line.match(toolRegex)
+    if (toolMatch) {
+      const toolName = toolMatch[1]
+      const delimIdx = Math.min(
+        line.indexOf('(') >= 0 ? line.indexOf('(') : Infinity,
+        line.indexOf('[') >= 0 ? line.indexOf('[') : Infinity,
+      )
+      const arg = line.slice(delimIdx + 1, delimIdx + 60).replace(/[)\]…]+$/, '').trim()
+      return arg ? `${toolName}: ${arg}` : toolName
+    }
+
+    // Claude thinking/processing animations (all known variants)
+    if (/Kneading|Thinking|Levitating|Brewing|Brewed|Cooked|Baking|Distilling/i.test(line)) {
+      return 'Thinking...'
+    }
+
+    // File reading progress
+    const readingMatch = line.match(/Reading (\d+ files?)/i)
+    if (readingMatch) return `Reading ${readingMatch[1]}`
+  }
+
+  return 'Thinking...'
+}
+
 function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
   const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false }
   const prevProc = info.proc
@@ -297,7 +361,7 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
   ptyProcess.onData((data: string) => {
     mainWindow?.webContents.send('terminal:data', id, data)
     const prev = tabLastOutput.get(id) || ''
-    const combined = (prev + data).slice(-500)
+    const combined = (prev + data).slice(-3000)
     tabLastOutput.set(id, combined)
     tabLastOutputAt.set(id, Date.now())
   })
@@ -374,12 +438,17 @@ function createWindow() {
 
         let lastOutput: string
         if (isClaudeRunning && active) {
-          // Claude is actively generating — show current PTY output (tool calls, progress, etc.)
-          lastOutput = extractLastLine(tabLastOutput.get(id) || '')
+          // Claude is actively generating — detect tool calls or show Thinking...
+          lastOutput = extractClaudeAction(tabLastOutput.get(id) || '')
         } else if (isClaudeRunning) {
           // Response complete — show last assistant text from JSONL (no thinking blocks)
-          lastOutput = getLastSessionText(info!.claudeSessionId, info!.cwd || HOME)
-            || extractLastLine(tabLastOutput.get(id) || '')
+          // If claudeSessionId is unknown, fall back to most recent session file for this cwd
+          const cwd = info!.cwd || HOME
+          let sessionId = info!.claudeSessionId
+          if (!sessionId) {
+            sessionId = getRecentClaudeSessions(cwd)[0] || null
+          }
+          lastOutput = getLastSessionText(sessionId, cwd)
         } else {
           lastOutput = extractLastLine(tabLastOutput.get(id) || '')
         }
@@ -419,12 +488,28 @@ function createWindow() {
     tabSessionWatchers.clear()
     tabOrder.length = 0
     tabCounter = 0
+    closedTabsHistory.length = 0
 
     return loadSession()
   })
 
   // Close a terminal tab
   ipcMain.on('terminal:close', (_event: Electron.IpcMainEvent, tabId: string) => {
+    // Save to closed history if had a claude session with conversation
+    const closingInfo = tabInfo.get(tabId)
+    if (closingInfo?.hadClaude) {
+      const sessionId = closingInfo.claudeSessionId || closingInfo.claudeResumeParentId
+      if (sessionId && sessionHasConversation(sessionId, closingInfo.cwd || HOME)) {
+        closedTabsHistory.unshift({
+          issue: closingInfo.issue,
+          cwd: closingInfo.cwd || HOME,
+          claudeSessionId: sessionId,
+          closedAt: Date.now(),
+        })
+        if (closedTabsHistory.length > 10) closedTabsHistory.pop()
+      }
+    }
+
     const timer = tabTimers.get(tabId)
     if (timer) { clearInterval(timer); tabTimers.delete(tabId) }
     tabInfo.delete(tabId)
@@ -441,6 +526,23 @@ function createWindow() {
       proc.kill()
       ptyProcesses.delete(tabId)
     }
+  })
+
+  // Whether a tab has an active claude session (used for close confirmation)
+  ipcMain.handle('terminal:get-tab-has-claude', (_event, tabId: string) => {
+    const info = tabInfo.get(tabId)
+    return !!info?.hadClaude
+  })
+
+  // Get recently closed tab history (for restore menu)
+  ipcMain.handle('terminal:get-closed-history', () => {
+    return [...closedTabsHistory]
+  })
+
+  // Remove an entry from closed history after restore
+  ipcMain.on('terminal:remove-closed-history', (_event: Electron.IpcMainEvent, sessionId: string) => {
+    const idx = closedTabsHistory.findIndex((e) => e.claudeSessionId === sessionId)
+    if (idx !== -1) closedTabsHistory.splice(idx, 1)
   })
 
   // Relay renderer input → pty, and capture prompts / detect claude launch

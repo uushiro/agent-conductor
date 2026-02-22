@@ -376,16 +376,33 @@ html, body, #root {
   min-height: 36px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
-  padding: 0 4px;
-  gap: 1px;
   user-select: none;
   -webkit-app-region: no-drag;
-  overflow-x: auto;
   flex-shrink: 0;
 }
 
-.tab-bar::-webkit-scrollbar {
+/* Scrollable tabs area */
+.tab-bar-tabs {
+  display: flex;
+  align-items: stretch;
+  flex: 1;
+  overflow-x: auto;
+  padding: 0 4px;
+  gap: 1px;
+  min-width: 0;
+}
+
+.tab-bar-tabs::-webkit-scrollbar {
   height: 0;
+}
+
+/* Non-scrolling actions area (+ and ↺) */
+.tab-bar-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 0 4px;
+  border-left: 1px solid var(--border);
 }
 
 .tab {
@@ -503,6 +520,194 @@ html, body, #root {
 
 .tab-new:hover {
   color: var(--text-primary);
+}
+
+/* Agent selector dropdown (+ button) */
+.tab-new-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.tab-agent-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 140px;
+  z-index: 200;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+
+.tab-agent-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 8px 14px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-primary);
+  font-size: 12px;
+  transition: background 0.1s;
+}
+
+.tab-agent-item:last-child {
+  border-bottom: none;
+}
+
+.tab-agent-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.tab-agent-default {
+  color: var(--accent);
+}
+
+.agent-icon {
+  font-size: 10px;
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.tab-agent-default .agent-icon {
+  color: var(--accent);
+}
+
+/* Restore dropdown */
+.tab-restore-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.tab-restore-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, opacity 0.15s;
+  flex-shrink: 0;
+}
+
+.tab-restore-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.tab-restore-btn:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+.tab-restore-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 220px;
+  z-index: 200;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+
+.tab-restore-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 8px 12px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-primary);
+  transition: background 0.1s;
+}
+
+.tab-restore-item:last-child {
+  border-bottom: none;
+}
+
+.tab-restore-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.restore-item-issue {
+  flex: 1;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.restore-item-cwd {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: 'SF Mono', 'Menlo', monospace;
+  flex-shrink: 0;
+}
+
+/* Tab close confirmation bar */
+.tab-confirm-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 14px;
+  background: #2a1f08;
+  border-bottom: 1px solid #5a4010;
+  font-size: 12px;
+  color: var(--text-primary);
+  flex-shrink: 0;
+}
+
+.tab-confirm-bar span {
+  flex: 1;
+}
+
+.tab-confirm-btn-close {
+  background: var(--accent-red);
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  padding: 3px 12px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.tab-confirm-btn-close:hover {
+  opacity: 0.85;
+}
+
+.tab-confirm-btn-cancel {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  padding: 3px 12px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.tab-confirm-btn-cancel:hover {
+  background: var(--bg-secondary);
 }
 
 /* Terminal content area */

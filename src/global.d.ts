@@ -1,3 +1,10 @@
+export interface ClosedTabEntry {
+  issue: string
+  cwd: string
+  claudeSessionId: string | null
+  closedAt: number
+}
+
 export interface TabInfo {
   id: string
   cwd: string
@@ -25,6 +32,9 @@ export interface ElectronAPI {
   getTerminalTitle: (tabId: string) => Promise<{ issue: string; detail: string }>
   setTerminalIssue: (tabId: string, issue: string) => Promise<void>
   listTerminalInfo: () => Promise<TabInfo[]>
+  getTabHasClaude: (tabId: string) => Promise<boolean>
+  getClosedHistory: () => Promise<ClosedTabEntry[]>
+  removeClosedHistory: (sessionId: string) => void
   loadSession: () => Promise<SavedSession | null>
   getGitBranch: () => Promise<string | null>
   getCwd: () => Promise<string>

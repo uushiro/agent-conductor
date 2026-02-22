@@ -8,6 +8,13 @@ interface Tab {
   customIssue: boolean
 }
 
+interface ClosedEntry {
+  issue: string
+  cwd: string
+  claudeSessionId: string | null
+  closedAt: number
+}
+
 interface Props {
   activeTabId: string
   onActiveTabChange: (tabId: string) => void
@@ -17,7 +24,13 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
   const [tabs, setTabs] = useState<Tab[]>([])
   const [editingTabId, setEditingTabId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
+  const [confirmClose, setConfirmClose] = useState<{ tabId: string; issue: string } | null>(null)
+  const [closedHistory, setClosedHistory] = useState<ClosedEntry[]>([])
+  const [showRestoreMenu, setShowRestoreMenu] = useState(false)
+  const [showAgentMenu, setShowAgentMenu] = useState(false)
   const editInputRef = useRef<HTMLInputElement>(null)
+  const restoreMenuRef = useRef<HTMLDivElement>(null)
+  const agentMenuRef = useRef<HTMLDivElement>(null)
   const initialized = useRef(false)
 
   // Restore session or create first tab on mount
@@ -92,6 +105,16 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
     return () => clearInterval(interval)
   }, [])
 
+  // Poll closed history
+  useEffect(() => {
+    const fetch = () => {
+      window.electronAPI.getClosedHistory().then(setClosedHistory)
+    }
+    fetch()
+    const interval = setInterval(fetch, 3000)
+    return () => clearInterval(interval)
+  }, [])
+
   // Focus input when editing starts
   useEffect(() => {
     if (editingTabId && editInputRef.current) {
@@ -100,20 +123,57 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
     }
   }, [editingTabId])
 
-  const createTab = useCallback(async () => {
+  // Close restore menu when clicking outside
+  useEffect(() => {
+    if (!showRestoreMenu) return
+    const handler = (e: MouseEvent) => {
+      if (restoreMenuRef.current && !restoreMenuRef.current.contains(e.target as Node)) {
+        setShowRestoreMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showRestoreMenu])
+
+  // Close agent menu when clicking outside
+  useEffect(() => {
+    if (!showAgentMenu) return
+    const handler = (e: MouseEvent) => {
+      if (agentMenuRef.current && !agentMenuRef.current.contains(e.target as Node)) {
+        setShowAgentMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showAgentMenu])
+
+  // Escape cancels confirm dialog
+  useEffect(() => {
+    if (!confirmClose) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setConfirmClose(null)
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [confirmClose])
+
+  const createTab = useCallback(async (agent: 'claude' | 'gemini' | 'terminal' = 'claude') => {
     const tabId = await window.electronAPI.createTerminal()
     setTabs((prev) => [
       ...prev,
       { id: tabId, issue: '', detail: 'Terminal', customIssue: false },
     ])
     onActiveTabChange(tabId)
-    // Auto-start Claude Code
-    setTimeout(() => {
-      window.electronAPI.sendTerminalInput(tabId, 'claude\r')
-    }, 1000)
+    if (agent !== 'terminal') {
+      setTimeout(() => {
+        const cmd = agent === 'gemini' ? 'gemini\r' : 'claude\r'
+        window.electronAPI.sendTerminalInput(tabId, cmd)
+      }, 1000)
+    }
   }, [onActiveTabChange])
 
-  const closeTab = useCallback(
+  // Actual close logic (no confirmation)
+  const doCloseTab = useCallback(
     (tabId: string) => {
       setTabs((prev) => {
         if (prev.length <= 1) return prev
@@ -128,6 +188,47 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
       })
     },
     [activeTabId, onActiveTabChange]
+  )
+
+  // Close with confirmation if Claude session exists
+  const closeTab = useCallback(
+    async (tabId: string) => {
+      const hasClaude = await window.electronAPI.getTabHasClaude(tabId)
+      if (hasClaude) {
+        const tab = tabs.find((t) => t.id === tabId)
+        setConfirmClose({ tabId, issue: tab?.issue || tab?.detail || 'このタブ' })
+        return
+      }
+      doCloseTab(tabId)
+    },
+    [tabs, doCloseTab]
+  )
+
+  // Restore a closed tab
+  const restoreTab = useCallback(
+    async (entry: ClosedEntry) => {
+      setShowRestoreMenu(false)
+      if (entry.claudeSessionId) {
+        window.electronAPI.removeClosedHistory(entry.claudeSessionId)
+      }
+      const tabId = await window.electronAPI.createTerminal(
+        entry.cwd,
+        entry.claudeSessionId ?? undefined
+      )
+      if (entry.issue) {
+        await window.electronAPI.setTerminalIssue(tabId, entry.issue)
+      }
+      setTabs((prev) => [
+        ...prev,
+        { id: tabId, issue: entry.issue, detail: '', customIssue: !!entry.issue },
+      ])
+      onActiveTabChange(tabId)
+      setTimeout(() => {
+        const cmd = entry.claudeSessionId ? `claude --resume ${entry.claudeSessionId}\r` : 'claude\r'
+        window.electronAPI.sendTerminalInput(tabId, cmd)
+      }, 1000)
+    },
+    [onActiveTabChange]
   )
 
   const startEditing = (tabId: string, currentIssue: string) => {
@@ -160,50 +261,125 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
   return (
     <div className="terminal-panel">
       <div className="tab-bar">
-        {tabs.map((tab) => (
-          <div
-            key={tab.id}
-            className={`tab ${tab.id === activeTabId ? 'tab-active' : ''} ${tab.issue ? 'tab-two-line' : ''}`}
-            onClick={() => onActiveTabChange(tab.id)}
-            onDoubleClick={() => startEditing(tab.id, tab.issue)}
-          >
-            {editingTabId === tab.id ? (
-              <input
-                ref={editInputRef}
-                className="tab-rename-input"
-                value={editValue}
-                placeholder="Issue name..."
-                onChange={(e) => setEditValue(e.target.value)}
-                onBlur={commitRename}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') commitRename()
-                  if (e.key === 'Escape') cancelEditing()
-                }}
-                onClick={(e) => e.stopPropagation()}
-              />
-            ) : (
-              <div className="tab-labels">
-                {tab.issue && <span className="tab-issue">{tab.issue}</span>}
-                <span className="tab-detail">{tab.detail}</span>
+        <div className="tab-bar-tabs">
+          {tabs.map((tab) => (
+            <div
+              key={tab.id}
+              className={`tab ${tab.id === activeTabId ? 'tab-active' : ''} ${tab.issue ? 'tab-two-line' : ''}`}
+              onClick={() => onActiveTabChange(tab.id)}
+              onDoubleClick={() => startEditing(tab.id, tab.issue)}
+            >
+              {editingTabId === tab.id ? (
+                <input
+                  ref={editInputRef}
+                  className="tab-rename-input"
+                  value={editValue}
+                  placeholder="Issue name..."
+                  onChange={(e) => setEditValue(e.target.value)}
+                  onBlur={commitRename}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitRename()
+                    if (e.key === 'Escape') cancelEditing()
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                />
+              ) : (
+                <div className="tab-labels">
+                  {tab.issue && <span className="tab-issue">{tab.issue}</span>}
+                  <span className="tab-detail">{tab.detail}</span>
+                </div>
+              )}
+              {tabs.length > 1 && editingTabId !== tab.id && (
+                <button
+                  className="tab-close"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    closeTab(tab.id)
+                  }}
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="tab-bar-actions">
+          <div className="tab-new-wrapper" ref={agentMenuRef}>
+            <button className="tab-new" onClick={() => setShowAgentMenu((v) => !v)}>
+              +
+            </button>
+            {showAgentMenu && (
+              <div className="tab-agent-menu">
+                <button
+                  className="tab-agent-item tab-agent-default"
+                  onClick={() => { createTab('claude'); setShowAgentMenu(false) }}
+                >
+                  <span className="agent-icon">◆</span>
+                  Claude
+                </button>
+                <button
+                  className="tab-agent-item"
+                  onClick={() => { createTab('gemini'); setShowAgentMenu(false) }}
+                >
+                  <span className="agent-icon">◇</span>
+                  Gemini
+                </button>
+                <button
+                  className="tab-agent-item"
+                  onClick={() => { createTab('terminal'); setShowAgentMenu(false) }}
+                >
+                  <span className="agent-icon">$</span>
+                  Terminal
+                </button>
               </div>
             )}
-            {tabs.length > 1 && editingTabId !== tab.id && (
-              <button
-                className="tab-close"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  closeTab(tab.id)
-                }}
-              >
-                ×
-              </button>
+          </div>
+          <div className="tab-restore-wrapper" ref={restoreMenuRef}>
+            <button
+              className="tab-restore-btn"
+              onClick={() => setShowRestoreMenu((v) => !v)}
+              title="最近閉じたタブを復元"
+              disabled={closedHistory.length === 0}
+            >
+              ↺
+            </button>
+            {showRestoreMenu && closedHistory.length > 0 && (
+              <div className="tab-restore-menu">
+                {closedHistory.map((entry, i) => (
+                  <button
+                    key={i}
+                    className="tab-restore-item"
+                    onClick={() => restoreTab(entry)}
+                  >
+                    <span className="restore-item-issue">{entry.issue || '(無題)'}</span>
+                    <span className="restore-item-cwd">{entry.cwd.split('/').pop() || entry.cwd}</span>
+                  </button>
+                ))}
+              </div>
             )}
           </div>
-        ))}
-        <button className="tab-new" onClick={createTab}>
-          +
-        </button>
+        </div>
       </div>
+      {confirmClose && (
+        <div className="tab-confirm-bar">
+          <span>「{confirmClose.issue}」を閉じますか？後で復元できます。</span>
+          <button
+            className="tab-confirm-btn-close"
+            onClick={() => {
+              doCloseTab(confirmClose.tabId)
+              setConfirmClose(null)
+            }}
+          >
+            閉じる
+          </button>
+          <button
+            className="tab-confirm-btn-cancel"
+            onClick={() => setConfirmClose(null)}
+          >
+            キャンセル
+          </button>
+        </div>
+      )}
       <div className="terminal-tabs-content">
         {tabs.map((tab) => (
           <Terminal key={tab.id} tabId={tab.id} isActive={tab.id === activeTabId} />

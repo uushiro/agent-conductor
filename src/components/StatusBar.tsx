@@ -32,7 +32,7 @@ export function StatusBar() {
         )}
       </div>
       <div className="status-right">
-        <span className="status-item">Claude Cockpit v0.1</span>
+        <span className="status-item">Agent Conductor v0.1</span>
       </div>
     </footer>
   )
