@@ -163,15 +163,19 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     return () => document.removeEventListener('mousedown', handler)
   }, [showAgentMenu])
 
-  // Escape cancels the close dialog (Enter is handled via Terminal onInterceptEnter)
+  // Escape cancels / Enter confirms the close dialog
   useEffect(() => {
     if (!confirmClose) return
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setConfirmClose(null)
+      if (e.key === 'Enter') {
+        doCloseTab(confirmClose.tabId)
+        setConfirmClose(null)
+      }
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [confirmClose])
+  }, [confirmClose, doCloseTab])
 
   const createTab = useCallback(async (agent: 'claude' | 'gemini' | 'terminal' = 'claude', initialPrompt?: string) => {
     const tabId = await window.electronAPI.createTerminal()
@@ -465,10 +469,6 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
             key={tab.id}
             tabId={tab.id}
             isActive={tab.id === activeTabId}
-            onInterceptEnter={confirmClose && tab.id === activeTabId ? () => {
-              doCloseTab(confirmClose.tabId)
-              setConfirmClose(null)
-            } : undefined}
           />
         ))}
       </div>

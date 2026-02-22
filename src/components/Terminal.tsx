@@ -6,16 +6,12 @@ import '@xterm/xterm/css/xterm.css'
 interface TerminalProps {
   tabId: string
   isActive: boolean
-  onInterceptEnter?: () => void
 }
 
-export function Terminal({ tabId, isActive, onInterceptEnter }: TerminalProps) {
+export function Terminal({ tabId, isActive }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<XTerm | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
-  const interceptEnterRef = useRef<(() => void) | undefined>(undefined)
-
-  useEffect(() => { interceptEnterRef.current = onInterceptEnter }, [onInterceptEnter])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -62,10 +58,6 @@ export function Terminal({ tabId, isActive, onInterceptEnter }: TerminalProps) {
 
     // Relay keyboard input → main process (with tabId)
     term.onData((data) => {
-      if (data === '\r' && interceptEnterRef.current) {
-        interceptEnterRef.current()
-        return
-      }
       window.electronAPI.sendTerminalInput(tabId, data)
     })
 
