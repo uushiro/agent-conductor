@@ -44,9 +44,33 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.send('terminal:remove-closed-history', sessionId)
   },
 
+  // Tab reorder
+  reorderTerminals: (tabIds: string[]) => {
+    ipcRenderer.send('terminal:reorder', tabIds)
+  },
+
   // Session persistence
   loadSession: () =>
     ipcRenderer.invoke('session:load') as Promise<{ tabs: Array<{ issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null }>; activeIndex: number } | null>,
+
+  // Task add from session
+  onTaskAdd: (cb: (title: string) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, title: string) => cb(title)
+    ipcRenderer.on('task:add', listener)
+    return () => ipcRenderer.removeListener('task:add', listener)
+  },
+
+  // Quit confirmation
+  onQuitConfirm: (cb: () => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('quit-confirm', listener)
+    return () => ipcRenderer.removeListener('quit-confirm', listener)
+  },
+  onQuitConfirmCancel: (cb: () => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('quit-confirm-cancel', listener)
+    return () => ipcRenderer.removeListener('quit-confirm-cancel', listener)
+  },
 
   // System info
   getGitBranch: () => ipcRenderer.invoke('git:branch'),

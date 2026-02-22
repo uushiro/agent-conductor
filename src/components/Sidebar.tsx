@@ -7,6 +7,7 @@ import type { TabInfo } from '../global'
 interface Props {
   onTabSelect: (tabId: string) => void
   activeTabId: string
+  onSendToAgent: (prompt: string, agent: 'claude' | 'gemini') => void
 }
 
 const HOME_RE = /^\/Users\/[^/]+/
@@ -15,10 +16,31 @@ function shortPath(cwd: string): string {
   return cwd.replace(HOME_RE, '~')
 }
 
-export function Sidebar({ activeTabId, onTabSelect }: Props) {
+export function Sidebar({ activeTabId, onTabSelect, onSendToAgent }: Props) {
   const { tasks, addTask, toggleTask, deleteTask } = useTasks()
   const [input, setInput] = useState('')
   const [tabInfos, setTabInfos] = useState<TabInfo[]>([])
+  const [flashTaskId, setFlashTaskId] = useState<string | null>(null)
+  const [tooltip, setTooltip] = useState<{ text: string; top: number } | null>(null)
+
+  const showTooltip = (e: React.MouseEvent<HTMLElement>, text: string) => {
+    const el = e.currentTarget
+    if (el.scrollWidth <= el.clientWidth && !text.includes('\n')) return
+    const rect = el.getBoundingClientRect()
+    setTooltip({ text, top: rect.top + rect.height / 2 })
+  }
+  const hideTooltip = () => setTooltip(null)
+
+  // Listen for tasks added from sessions
+  useEffect(() => {
+    return window.electronAPI.onTaskAdd((title) => {
+      const id = addTask(title)
+      if (id) {
+        setFlashTaskId(id)
+        setTimeout(() => setFlashTaskId(null), 1500)
+      }
+    })
+  }, [addTask])
 
   // Poll tab info from main process
   useEffect(() => {
@@ -56,11 +78,19 @@ export function Sidebar({ activeTabId, onTabSelect }: Props) {
             >
               <span className={`tab-status-dot ${tab.active ? 'dot-active' : 'dot-idle'}`} />
               <div className="tab-list-labels">
-                <span className="tab-list-issue">
+                <span
+                  className="tab-list-issue"
+                  onMouseEnter={(e) => showTooltip(e, tab.issue || `Session ${idx + 1}`)}
+                  onMouseLeave={hideTooltip}
+                >
                   {tab.issue || `Session ${idx + 1}`}
                 </span>
                 {tab.lastOutput && (
-                  <span className={`tab-last-output ${tab.isThinking ? 'tab-last-output-thinking' : ''}`}>
+                  <span
+                    className={`tab-last-output ${tab.isThinking ? 'tab-last-output-thinking' : ''}`}
+                    onMouseEnter={(e) => showTooltip(e, tab.lastOutput)}
+                    onMouseLeave={hideTooltip}
+                  >
                     {tab.lastOutput}
                   </span>
                 )}
@@ -90,18 +120,23 @@ export function Sidebar({ activeTabId, onTabSelect }: Props) {
 
         <div className="task-list">
           {pending.map((task) => (
-            <TaskItem key={task.id} task={task} onToggle={toggleTask} onDelete={deleteTask} />
+            <TaskItem key={task.id} task={task} onToggle={toggleTask} onDelete={deleteTask} onSendToAgent={onSendToAgent} flash={flashTaskId === task.id} onShowTooltip={showTooltip} onHideTooltip={hideTooltip} />
           ))}
           {completed.length > 0 && (
             <>
               <div className="task-divider">Completed</div>
               {completed.map((task) => (
-                <TaskItem key={task.id} task={task} onToggle={toggleTask} onDelete={deleteTask} />
+                <TaskItem key={task.id} task={task} onToggle={toggleTask} onDelete={deleteTask} onSendToAgent={onSendToAgent} flash={false} onShowTooltip={showTooltip} onHideTooltip={hideTooltip} />
               ))}
             </>
           )}
         </div>
       </div>
+      {tooltip && (
+        <div className="sidebar-tooltip" style={{ top: tooltip.top }}>
+          {tooltip.text}
+        </div>
+      )}
     </aside>
   )
 }

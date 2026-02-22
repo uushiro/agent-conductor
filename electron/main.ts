@@ -8,18 +8,25 @@ import { execFile } from 'node:child_process'
 const pty = require('node-pty')
 
 let mainWindow: BrowserWindow | null = null
+let quitConfirmPending = false
+let quitConfirmTimer: ReturnType<typeof setTimeout> | null = null
 
 const SHELLS = new Set(['zsh', 'bash', 'fish', 'sh', 'login'])
 
 // Map of tabId → pty instance
 const ptyProcesses = new Map<string, ReturnType<typeof pty.spawn>>()
 const tabTimers = new Map<string, ReturnType<typeof setInterval>>()
-const tabInfo = new Map<string, { cwd: string; proc: string; issue: string; latestInput: string; claudeSessionId: string | null; claudeResumeParentId: string | null; hadClaude: boolean }>()
+const tabInfo = new Map<string, {
+  cwd: string; proc: string; issue: string; latestInput: string
+  claudeSessionId: string | null; claudeResumeParentId: string | null; hadClaude: boolean
+  hadGemini: boolean; geminiSessionFile: string | null
+}>()
 
 interface ClosedTabEntry {
   issue: string
   cwd: string
   claudeSessionId: string | null
+  agent: 'claude' | 'gemini'
   closedAt: number
 }
 const closedTabsHistory: ClosedTabEntry[] = []
@@ -28,6 +35,7 @@ const tabLastOutput = new Map<string, string>()
 const tabLastOutputAt = new Map<string, number>()
 const tabLastInputAt = new Map<string, number>()
 const tabSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
+const tabGeminiSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
 
 // Strip ANSI/OSC escape codes and extract last meaningful line
 function extractLastLine(raw: string): string {
@@ -60,6 +68,7 @@ interface SavedTab {
   cwd: string
   hadClaude: boolean
   claudeSessionId: string | null
+  hadGemini: boolean
 }
 
 interface SavedSession {
@@ -113,6 +122,7 @@ function saveSession() {
         cwd: info.cwd || HOME,
         hadClaude,
         claudeSessionId,
+        hadGemini: info.hadGemini,
       })
     }
   }
@@ -203,6 +213,83 @@ function startSessionWatch(tabId: string, cwd: string) {
   }, 60000)
 }
 
+// --- Gemini session helpers ---
+
+// Gemini stores sessions in ~/.gemini/tmp/<project-dirname>/chats/session-*.json
+function geminiSessionDir(cwd: string): string {
+  return path.join(HOME, '.gemini', 'tmp', path.basename(cwd) || 'home', 'chats')
+}
+
+// Get the most recently modified Gemini session file for a cwd
+function getLastGeminiSessionFile(cwd: string): string | null {
+  const dir = geminiSessionDir(cwd)
+  try {
+    const files = fs.readdirSync(dir)
+      .filter((f: string) => f.startsWith('session-') && f.endsWith('.json'))
+      .map((f: string) => ({ file: f, mtime: fs.statSync(path.join(dir, f)).mtimeMs }))
+      .sort((a: { mtime: number }, b: { mtime: number }) => b.mtime - a.mtime)
+    if (files.length > 0) return path.join(dir, (files[0] as { file: string }).file)
+  } catch { /* ignore */ }
+  return null
+}
+
+// Read the last Gemini response text from a session JSON file
+function getLastGeminiSessionText(sessionFile: string | null): string {
+  if (!sessionFile) return ''
+  try {
+    const raw = fs.readFileSync(sessionFile, 'utf-8')
+    const session = JSON.parse(raw)
+    const messages: Array<{ type: string; content: unknown }> = session.messages || []
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]
+      if (msg.type === 'gemini' && typeof msg.content === 'string' && msg.content.trim()) {
+        return msg.content.slice(0, 120).replace(/\n+/g, ' ').trim()
+      }
+    }
+  } catch { /* ignore */ }
+  return ''
+}
+
+// Watch for a new Gemini session file created after Gemini starts
+function startGeminiSessionWatch(tabId: string, cwd: string) {
+  const existing = tabGeminiSessionWatchers.get(tabId)
+  if (existing) { clearInterval(existing); tabGeminiSessionWatchers.delete(tabId) }
+
+  const sessionDir = geminiSessionDir(cwd)
+  let knownFiles: Set<string>
+  try {
+    knownFiles = new Set(fs.readdirSync(sessionDir).filter((f: string) => f.startsWith('session-') && f.endsWith('.json')))
+  } catch { knownFiles = new Set() }
+  const startTime = Date.now()
+
+  const watcher = setInterval(() => {
+    try {
+      const current = fs.readdirSync(sessionDir).filter((f: string) => f.startsWith('session-') && f.endsWith('.json'))
+      const newFiles = current
+        .filter((f: string) => !knownFiles.has(f))
+        .map((f: string) => {
+          try { return { file: f, mtime: fs.statSync(path.join(sessionDir, f)).mtimeMs } }
+          catch { return null }
+        })
+        .filter((e): e is { file: string; mtime: number } => e !== null && e.mtime >= startTime - 500)
+        .sort((a, b) => a.mtime - b.mtime)
+      if (newFiles.length > 0) {
+        const sessionFile = path.join(sessionDir, newFiles[0].file)
+        const info = tabInfo.get(tabId)
+        if (info) { info.geminiSessionFile = sessionFile; tabInfo.set(tabId, info) }
+        clearInterval(watcher)
+        tabGeminiSessionWatchers.delete(tabId)
+      }
+    } catch { /* ignore */ }
+  }, 1000)
+
+  tabGeminiSessionWatchers.set(tabId, watcher)
+  setTimeout(() => {
+    const w = tabGeminiSessionWatchers.get(tabId)
+    if (w === watcher) { clearInterval(watcher); tabGeminiSessionWatchers.delete(tabId) }
+  }, 60000)
+}
+
 // Check if a session file has actual conversation content
 function sessionHasConversation(sessionId: string, cwd: string): boolean {
   const encoded = cwd.replace(/\//g, '-')
@@ -290,7 +377,16 @@ function extractClaudeAction(raw: string): string {
       return arg ? `${toolName}: ${arg}` : toolName
     }
 
-    // Claude thinking/processing animations (all known variants)
+    // Gemini tool format: ServerName[method](args) e.g. "Claude in Chrome[navigate](url)"
+    const geminiToolMatch = line.match(/^[●•⠿⠸⠼⠦⠧⠇⠏\s]*(.+?)\[(\w+)\](?:\(([^)]*)\))?$/)
+    if (geminiToolMatch && geminiToolMatch[1].trim().length > 0 && geminiToolMatch[1].trim().length < 50) {
+      const server = geminiToolMatch[1].trim()
+      const method = geminiToolMatch[2]
+      const arg = geminiToolMatch[3] ? `: ${geminiToolMatch[3].slice(0, 40)}` : ''
+      return `${server}[${method}]${arg}`
+    }
+
+    // Thinking/processing animations (Claude and Gemini variants)
     if (/Kneading|Thinking|Levitating|Brewing|Brewed|Cooked|Baking|Distilling/i.test(line)) {
       return 'Thinking...'
     }
@@ -316,13 +412,20 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
     tabLastOutput.delete(id)
     tabLastOutputAt.delete(id)
     if (SHELLS.has(prevProc) && !SHELLS.has(info.proc) && info.proc !== '') {
-      // Shell → app: mark hadClaude (session watch already started at claude\r time)
-      info.hadClaude = true
+      // Shell → agent: mark appropriate flag (session watch started at input time)
+      if (info.proc === 'claude') info.hadClaude = true
+      if (info.proc === 'gemini') info.hadGemini = true
     } else if (prevProc !== '' && !SHELLS.has(prevProc) && SHELLS.has(info.proc)) {
-      // App → shell (only when previously running a real non-shell process): clear
-      info.hadClaude = false
-      info.claudeSessionId = null
-      info.claudeResumeParentId = null
+      // Agent → shell: clear agent state
+      if (prevProc === 'claude') {
+        info.hadClaude = false
+        info.claudeSessionId = null
+        info.claudeResumeParentId = null
+      }
+      if (prevProc === 'gemini') {
+        info.hadGemini = false
+        info.geminiSessionFile = null
+      }
       info.latestInput = ''
       tabInputBuf.delete(id)
     }
@@ -354,7 +457,7 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
   })
 
   ptyProcesses.set(id, ptyProcess)
-  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false })
+  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null })
   tabOrder.push(id)
 
   // Relay pty output → renderer, and buffer last output for sidebar
@@ -364,6 +467,14 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
     const combined = (prev + data).slice(-3000)
     tabLastOutput.set(id, combined)
     tabLastOutputAt.set(id, Date.now())
+
+    // Detect [[TASK: ...]] pattern (scan overlap to handle chunk splits)
+    const scanBuf = prev.slice(-100) + data
+    const stripped = scanBuf.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\r/g, '')
+    for (const match of stripped.matchAll(/\[\[TASK:\s*(.+?)\]\]/g)) {
+      const title = match[1].trim()
+      if (title) mainWindow?.webContents.send('task:add', title)
+    }
   })
 
   // Poll process name + cwd
@@ -411,7 +522,27 @@ function createWindow() {
   ipcMain.handle('terminal:get-title', (_event, tabId: string) => {
     const info = tabInfo.get(tabId)
     if (!info) return { issue: '', detail: 'Terminal' }
-    return getTabTitle(info)
+    const result = getTabTitle(info)
+    // If detail fell back to directory name (latestInput is empty), try to populate
+    // from session file so resumed tabs show last response instead of "~"
+    if (result.detail === shortDir(info.cwd)) {
+      if (info.hadClaude) {
+        const cwd = info.cwd || HOME
+        let sessionId = info.claudeSessionId
+        if (!sessionId) sessionId = getRecentClaudeSessions(cwd)[0] || null
+        let text = getLastSessionText(sessionId, cwd)
+        if (!text && info.claudeResumeParentId && info.claudeResumeParentId !== sessionId) {
+          text = getLastSessionText(info.claudeResumeParentId, cwd)
+        }
+        if (text) result.detail = text
+      } else if (info.hadGemini) {
+        const cwd = info.cwd || HOME
+        const sessionFile = info.geminiSessionFile || getLastGeminiSessionFile(cwd)
+        const text = getLastGeminiSessionText(sessionFile)
+        if (text) result.detail = text
+      }
+    }
+    return result
   })
 
   // Set issue from renderer (manual rename)
@@ -431,24 +562,34 @@ function createWindow() {
         const info = tabInfo.get(id)
         const lastOutputAt = tabLastOutputAt.get(id) ?? 0
         const lastInputAt = tabLastInputAt.get(id) ?? 0
-        // "active" = PTY had output within the last 3 s (Claude is generating)
+        // "active" = PTY had output within the last 3 s (agent is generating)
         const active = (now - lastOutputAt) < 3000
         const isClaudeRunning = !!info?.hadClaude && !!info?.proc && !SHELLS.has(info.proc)
-        const isThinking = isClaudeRunning && active
+        const isGeminiRunning = !!info?.hadGemini && !!info?.proc && !SHELLS.has(info.proc)
+        const isAgentRunning = isClaudeRunning || isGeminiRunning
+        const isThinking = isAgentRunning && active
 
         let lastOutput: string
-        if (isClaudeRunning && active) {
-          // Claude is actively generating — detect tool calls or show Thinking...
+        if (isAgentRunning && active) {
+          // Agent is actively generating — detect tool calls or show Thinking...
           lastOutput = extractClaudeAction(tabLastOutput.get(id) || '')
         } else if (isClaudeRunning) {
-          // Response complete — show last assistant text from JSONL (no thinking blocks)
-          // If claudeSessionId is unknown, fall back to most recent session file for this cwd
+          // Claude idle — show last assistant text from JSONL
           const cwd = info!.cwd || HOME
           let sessionId = info!.claudeSessionId
-          if (!sessionId) {
-            sessionId = getRecentClaudeSessions(cwd)[0] || null
-          }
+          if (!sessionId) sessionId = getRecentClaudeSessions(cwd)[0] || null
           lastOutput = getLastSessionText(sessionId, cwd)
+          // If current session is empty (e.g. just resumed, no new messages yet),
+          // fall back to the parent session which has the prior conversation
+          if (!lastOutput && info!.claudeResumeParentId && info!.claudeResumeParentId !== sessionId) {
+            lastOutput = getLastSessionText(info!.claudeResumeParentId, cwd)
+          }
+        } else if (isGeminiRunning) {
+          // Gemini idle — show last response from session JSON
+          const cwd = info!.cwd || HOME
+          let sessionFile = info!.geminiSessionFile
+          if (!sessionFile) sessionFile = getLastGeminiSessionFile(cwd)
+          lastOutput = getLastGeminiSessionText(sessionFile)
         } else {
           lastOutput = extractLastLine(tabLastOutput.get(id) || '')
         }
@@ -486,6 +627,8 @@ function createWindow() {
     tabLastInputAt.clear()
     for (const w of tabSessionWatchers.values()) clearInterval(w)
     tabSessionWatchers.clear()
+    for (const w of tabGeminiSessionWatchers.values()) clearInterval(w)
+    tabGeminiSessionWatchers.clear()
     tabOrder.length = 0
     tabCounter = 0
     closedTabsHistory.length = 0
@@ -495,16 +638,23 @@ function createWindow() {
 
   // Close a terminal tab
   ipcMain.on('terminal:close', (_event: Electron.IpcMainEvent, tabId: string) => {
-    // Save to closed history if had a claude session with conversation
+    // Save to closed history if had an agent session
     const closingInfo = tabInfo.get(tabId)
     if (closingInfo?.hadClaude) {
       const sessionId = closingInfo.claudeSessionId || closingInfo.claudeResumeParentId
       if (sessionId && sessionHasConversation(sessionId, closingInfo.cwd || HOME)) {
         closedTabsHistory.unshift({
-          issue: closingInfo.issue,
-          cwd: closingInfo.cwd || HOME,
-          claudeSessionId: sessionId,
-          closedAt: Date.now(),
+          issue: closingInfo.issue, cwd: closingInfo.cwd || HOME,
+          claudeSessionId: sessionId, agent: 'claude', closedAt: Date.now(),
+        })
+        if (closedTabsHistory.length > 10) closedTabsHistory.pop()
+      }
+    } else if (closingInfo?.hadGemini) {
+      const sessionFile = closingInfo.geminiSessionFile || getLastGeminiSessionFile(closingInfo.cwd || HOME)
+      if (sessionFile) {
+        closedTabsHistory.unshift({
+          issue: closingInfo.issue, cwd: closingInfo.cwd || HOME,
+          claudeSessionId: null, agent: 'gemini', closedAt: Date.now(),
         })
         if (closedTabsHistory.length > 10) closedTabsHistory.pop()
       }
@@ -528,10 +678,18 @@ function createWindow() {
     }
   })
 
+  // Reorder tabs (drag & drop from renderer)
+  ipcMain.on('terminal:reorder', (_event: Electron.IpcMainEvent, newOrder: string[]) => {
+    tabOrder.length = 0
+    for (const id of newOrder) {
+      if (ptyProcesses.has(id)) tabOrder.push(id)
+    }
+  })
+
   // Whether a tab has an active claude session (used for close confirmation)
   ipcMain.handle('terminal:get-tab-has-claude', (_event, tabId: string) => {
     const info = tabInfo.get(tabId)
-    return !!info?.hadClaude
+    return !!(info?.hadClaude || info?.hadGemini)
   })
 
   // Get recently closed tab history (for restore menu)
@@ -565,6 +723,13 @@ function createWindow() {
       tabInputBuf.set(tabId, '')
 
       if (isShell) {
+        // Detect "gemini" command
+        if (/^gemini(\s|$)/.test(input)) {
+          info.hadGemini = true
+          tabInfo.set(tabId, info)
+          startGeminiSessionWatch(tabId, info.cwd || HOME)
+        }
+
         // Detect "claude" command being launched from shell → snapshot NOW before file is created
         if (/^claude(\s|$)/.test(input)) {
           info.hadClaude = true
@@ -660,6 +825,21 @@ function createWindow() {
 }
 
 app.whenReady().then(createWindow)
+
+app.on('before-quit', (event) => {
+  if (!quitConfirmPending) {
+    event.preventDefault()
+    quitConfirmPending = true
+    mainWindow?.webContents.send('quit-confirm')
+    quitConfirmTimer = setTimeout(() => {
+      quitConfirmPending = false
+      mainWindow?.webContents.send('quit-confirm-cancel')
+    }, 3000)
+  } else {
+    if (quitConfirmTimer) { clearTimeout(quitConfirmTimer); quitConfirmTimer = null }
+    saveSession()
+  }
+})
 
 app.on('window-all-closed', () => {
   app.quit()

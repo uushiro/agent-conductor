@@ -29,12 +29,14 @@ export function useTasks() {
     saveTasks(tasks)
   }, [tasks])
 
-  const addTask = useCallback((title: string) => {
-    if (!title.trim()) return
+  const addTask = useCallback((title: string): string | null => {
+    if (!title.trim()) return null
+    const id = crypto.randomUUID()
     setTasks((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), title: title.trim(), done: false, createdAt: Date.now() },
+      { id, title: title.trim(), done: false, createdAt: Date.now() },
     ])
+    return id
   }, [])
 
   const toggleTask = useCallback((id: string) => {

@@ -2,6 +2,7 @@ export interface ClosedTabEntry {
   issue: string
   cwd: string
   claudeSessionId: string | null
+  agent: 'claude' | 'gemini'
   closedAt: number
 }
 
@@ -19,7 +20,7 @@ export interface TabInfo {
 }
 
 export interface SavedSession {
-  tabs: Array<{ issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null }>
+  tabs: Array<{ issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null; hadGemini: boolean }>
   activeIndex: number
 }
 
@@ -33,9 +34,13 @@ export interface ElectronAPI {
   setTerminalIssue: (tabId: string, issue: string) => Promise<void>
   listTerminalInfo: () => Promise<TabInfo[]>
   getTabHasClaude: (tabId: string) => Promise<boolean>
+  reorderTerminals: (tabIds: string[]) => void
   getClosedHistory: () => Promise<ClosedTabEntry[]>
   removeClosedHistory: (sessionId: string) => void
   loadSession: () => Promise<SavedSession | null>
+  onTaskAdd: (cb: (title: string) => void) => () => void
+  onQuitConfirm: (cb: () => void) => () => void
+  onQuitConfirmCancel: (cb: () => void) => () => void
   getGitBranch: () => Promise<string | null>
   getCwd: () => Promise<string>
 }

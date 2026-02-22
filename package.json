@@ -6,7 +6,27 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "dist": "npm run build && electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.uushiro.agent-conductor",
+    "productName": "Agent Conductor",
+    "icon": "assets/icon.icns",
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "assets/icon.icns"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "assets/icon.icns",
+      "node_modules/**/*"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/node-pty/**/*"
+    ]
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
@@ -20,6 +40,7 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
     "electron-rebuild": "^3.2.9",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",

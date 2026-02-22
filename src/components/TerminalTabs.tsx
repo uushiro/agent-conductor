@@ -1,5 +1,9 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from 'react'
 import { Terminal } from './Terminal'
+
+export interface TerminalTabsHandle {
+  sendToNewTab: (prompt: string, agent: 'claude' | 'gemini') => void
+}
 
 interface Tab {
   id: string
@@ -12,6 +16,7 @@ interface ClosedEntry {
   issue: string
   cwd: string
   claudeSessionId: string | null
+  agent: 'claude' | 'gemini'
   closedAt: number
 }
 
@@ -20,7 +25,7 @@ interface Props {
   onActiveTabChange: (tabId: string) => void
 }
 
-export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
+export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function TerminalTabs({ activeTabId, onActiveTabChange }, ref) {
   const [tabs, setTabs] = useState<Tab[]>([])
   const [editingTabId, setEditingTabId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
@@ -28,6 +33,10 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
   const [closedHistory, setClosedHistory] = useState<ClosedEntry[]>([])
   const [showRestoreMenu, setShowRestoreMenu] = useState(false)
   const [showAgentMenu, setShowAgentMenu] = useState(false)
+  const [dragOverIdx, setDragOverIdx] = useState<number>(-1)
+  const [dragSrcIdxState, setDragSrcIdxState] = useState<number>(-1)
+  const dragSrcIdx = useRef<number>(-1)
+  const dragOverIdxRef = useRef<number>(-1)
   const editInputRef = useRef<HTMLInputElement>(null)
   const restoreMenuRef = useRef<HTMLDivElement>(null)
   const agentMenuRef = useRef<HTMLDivElement>(null)
@@ -45,9 +54,8 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
     if (session && session.tabs.length > 0) {
       const restored: Tab[] = []
       const claudeResumes: Array<{ tabId: string; sessionId: string | null }> = []
+      const geminiResumes: Array<{ tabId: string }> = []
       for (const saved of session.tabs) {
-        // Pass pendingSessionId so hadClaude+claudeResumeParentId are set immediately,
-        // protecting against app exit before the staggered claude --resume fires.
         const tabId = await window.electronAPI.createTerminal(
           saved.cwd,
           saved.hadClaude ? saved.claudeSessionId ?? undefined : undefined
@@ -57,6 +65,8 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
         }
         if (saved.hadClaude) {
           claudeResumes.push({ tabId, sessionId: saved.claudeSessionId })
+        } else if (saved.hadGemini) {
+          geminiResumes.push({ tabId })
         }
         restored.push({
           id: tabId,
@@ -69,14 +79,20 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
       const activeIdx = Math.min(session.activeIndex, restored.length - 1)
       onActiveTabChange(restored[activeIdx]?.id || restored[0]?.id || '')
 
-      // Auto-resume claude in tabs that had it running.
-      // 3000ms stagger ensures each Claude creates its session file before the next
-      // tab's watcher takes its knownFiles snapshot, preventing cross-tab session mixing.
+      // Auto-resume Claude tabs (3000ms stagger to prevent cross-tab session mixing)
       claudeResumes.forEach(({ tabId, sessionId }, i) => {
         setTimeout(() => {
           const cmd = sessionId ? `claude --resume ${sessionId}\r` : 'claude\r'
           window.electronAPI.sendTerminalInput(tabId, cmd)
         }, 1000 + i * 3000)
+      })
+
+      // Auto-resume Gemini tabs (after all Claude resumes)
+      const claudeOffset = 1000 + claudeResumes.length * 3000
+      geminiResumes.forEach(({ tabId }, i) => {
+        setTimeout(() => {
+          window.electronAPI.sendTerminalInput(tabId, 'gemini --resume latest\r')
+        }, claudeOffset + i * 2000)
       })
     } else {
       createTab()
@@ -157,7 +173,7 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
     return () => document.removeEventListener('keydown', handler)
   }, [confirmClose])
 
-  const createTab = useCallback(async (agent: 'claude' | 'gemini' | 'terminal' = 'claude') => {
+  const createTab = useCallback(async (agent: 'claude' | 'gemini' | 'terminal' = 'claude', initialPrompt?: string) => {
     const tabId = await window.electronAPI.createTerminal()
     setTabs((prev) => [
       ...prev,
@@ -168,9 +184,21 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
       setTimeout(() => {
         const cmd = agent === 'gemini' ? 'gemini\r' : 'claude\r'
         window.electronAPI.sendTerminalInput(tabId, cmd)
+        if (initialPrompt) {
+          // Wait for agent to initialize before sending the prompt
+          setTimeout(() => {
+            window.electronAPI.sendTerminalInput(tabId, initialPrompt + '\r')
+          }, 4000)
+        }
       }, 1000)
     }
   }, [onActiveTabChange])
+
+  useImperativeHandle(ref, () => ({
+    sendToNewTab: (prompt: string, agent: 'claude' | 'gemini') => {
+      createTab(agent, prompt)
+    },
+  }), [createTab])
 
   // Actual close logic (no confirmation)
   const doCloseTab = useCallback(
@@ -224,12 +252,61 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
       ])
       onActiveTabChange(tabId)
       setTimeout(() => {
-        const cmd = entry.claudeSessionId ? `claude --resume ${entry.claudeSessionId}\r` : 'claude\r'
+        const cmd = entry.agent === 'gemini'
+          ? 'gemini --resume latest\r'
+          : entry.claudeSessionId ? `claude --resume ${entry.claudeSessionId}\r` : 'claude\r'
         window.electronAPI.sendTerminalInput(tabId, cmd)
       }, 1000)
     },
     [onActiveTabChange]
   )
+
+  const handleTabMouseDown = useCallback((e: React.MouseEvent, idx: number) => {
+    if (editingTabId || e.button !== 0) return
+    const startX = e.clientX
+    let started = false
+
+    const onMouseMove = (me: MouseEvent) => {
+      if (!started) {
+        if (Math.abs(me.clientX - startX) < 5) return
+        started = true
+        dragSrcIdx.current = idx
+        setDragSrcIdxState(idx)
+        document.body.style.cursor = 'grabbing'
+      }
+      const el = document.elementFromPoint(me.clientX, me.clientY)
+      const tabEl = el?.closest('[data-tab-idx]')
+      const overIdx = tabEl ? parseInt(tabEl.getAttribute('data-tab-idx') ?? '-1') : -1
+      if (overIdx !== dragOverIdxRef.current) {
+        dragOverIdxRef.current = overIdx
+        setDragOverIdx(overIdx)
+      }
+    }
+
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+      document.body.style.cursor = ''
+      const from = dragSrcIdx.current
+      const to = dragOverIdxRef.current
+      dragSrcIdx.current = -1
+      dragOverIdxRef.current = -1
+      setDragSrcIdxState(-1)
+      setDragOverIdx(-1)
+      if (started && from !== -1 && to !== -1 && from !== to) {
+        setTabs((prev) => {
+          const next = [...prev]
+          const [moved] = next.splice(from, 1)
+          next.splice(to, 0, moved)
+          window.electronAPI.reorderTerminals(next.map((t) => t.id))
+          return next
+        })
+      }
+    }
+
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+  }, [editingTabId])
 
   const startEditing = (tabId: string, currentIssue: string) => {
     setEditingTabId(tabId)
@@ -262,10 +339,12 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
     <div className="terminal-panel">
       <div className="tab-bar">
         <div className="tab-bar-tabs">
-          {tabs.map((tab) => (
+          {tabs.map((tab, idx) => (
             <div
               key={tab.id}
-              className={`tab ${tab.id === activeTabId ? 'tab-active' : ''} ${tab.issue ? 'tab-two-line' : ''}`}
+              data-tab-idx={idx}
+              className={`tab ${tab.id === activeTabId ? 'tab-active' : ''} ${tab.issue ? 'tab-two-line' : ''} ${dragOverIdx === idx && dragSrcIdxState !== idx ? 'tab-drag-over' : ''} ${dragSrcIdxState === idx ? 'tab-dragging' : ''}`}
+              onMouseDown={(e) => handleTabMouseDown(e, idx)}
               onClick={() => onActiveTabChange(tab.id)}
               onDoubleClick={() => startEditing(tab.id, tab.issue)}
             >
@@ -387,4 +466,4 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
       </div>
     </div>
   )
-}
+})
