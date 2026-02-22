@@ -163,23 +163,8 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     return () => document.removeEventListener('mousedown', handler)
   }, [showAgentMenu])
 
-  // Actual close logic (no confirmation)
-  const doCloseTab = useCallback(
-    (tabId: string) => {
-      setTabs((prev) => {
-        if (prev.length <= 1) return prev
-        const idx = prev.findIndex((t) => t.id === tabId)
-        const updated = prev.filter((t) => t.id !== tabId)
-        window.electronAPI.closeTerminal(tabId)
-        if (tabId === activeTabId) {
-          const newIdx = Math.min(idx, updated.length - 1)
-          onActiveTabChange(updated[newIdx].id)
-        }
-        return updated
-      })
-    },
-    [activeTabId, onActiveTabChange]
-  )
+  // ref to always-current doCloseTab (used in keydown handler below)
+  const doCloseTabRef = useRef<(tabId: string) => void>(() => {})
 
   // Escape cancels / Enter confirms the close dialog
   useEffect(() => {
@@ -187,13 +172,13 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setConfirmClose(null)
       if (e.key === 'Enter') {
-        doCloseTab(confirmClose.tabId)
+        doCloseTabRef.current(confirmClose.tabId)
         setConfirmClose(null)
       }
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [confirmClose, doCloseTab])
+  }, [confirmClose])
 
   const createTab = useCallback(async (agent: 'claude' | 'gemini' | 'terminal' = 'claude', initialPrompt?: string) => {
     const tabId = await window.electronAPI.createTerminal()
@@ -221,6 +206,25 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       createTab(agent, prompt)
     },
   }), [createTab])
+
+  // Actual close logic (no confirmation)
+  const doCloseTab = useCallback(
+    (tabId: string) => {
+      setTabs((prev) => {
+        if (prev.length <= 1) return prev
+        const idx = prev.findIndex((t) => t.id === tabId)
+        const updated = prev.filter((t) => t.id !== tabId)
+        window.electronAPI.closeTerminal(tabId)
+        if (tabId === activeTabId) {
+          const newIdx = Math.min(idx, updated.length - 1)
+          onActiveTabChange(updated[newIdx].id)
+        }
+        return updated
+      })
+    },
+    [activeTabId, onActiveTabChange]
+  )
+  doCloseTabRef.current = doCloseTab
 
   // Close with confirmation if Claude session exists
   const closeTab = useCallback(
