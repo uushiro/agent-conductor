@@ -163,6 +163,24 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     return () => document.removeEventListener('mousedown', handler)
   }, [showAgentMenu])
 
+  // Actual close logic (no confirmation)
+  const doCloseTab = useCallback(
+    (tabId: string) => {
+      setTabs((prev) => {
+        if (prev.length <= 1) return prev
+        const idx = prev.findIndex((t) => t.id === tabId)
+        const updated = prev.filter((t) => t.id !== tabId)
+        window.electronAPI.closeTerminal(tabId)
+        if (tabId === activeTabId) {
+          const newIdx = Math.min(idx, updated.length - 1)
+          onActiveTabChange(updated[newIdx].id)
+        }
+        return updated
+      })
+    },
+    [activeTabId, onActiveTabChange]
+  )
+
   // Escape cancels / Enter confirms the close dialog
   useEffect(() => {
     if (!confirmClose) return
@@ -203,24 +221,6 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       createTab(agent, prompt)
     },
   }), [createTab])
-
-  // Actual close logic (no confirmation)
-  const doCloseTab = useCallback(
-    (tabId: string) => {
-      setTabs((prev) => {
-        if (prev.length <= 1) return prev
-        const idx = prev.findIndex((t) => t.id === tabId)
-        const updated = prev.filter((t) => t.id !== tabId)
-        window.electronAPI.closeTerminal(tabId)
-        if (tabId === activeTabId) {
-          const newIdx = Math.min(idx, updated.length - 1)
-          onActiveTabChange(updated[newIdx].id)
-        }
-        return updated
-      })
-    },
-    [activeTabId, onActiveTabChange]
-  )
 
   // Close with confirmation if Claude session exists
   const closeTab = useCallback(
