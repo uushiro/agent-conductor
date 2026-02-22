@@ -38,9 +38,11 @@ const tabSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
 const tabGeminiSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
 // tabId → timestamp until which [[TASK:]] detection is suppressed (resume replay window)
 const tabTaskCooldown = new Map<string, number>()
-const TASK_RESUME_COOLDOWN_MS = 15000
+const TASK_RESUME_COOLDOWN_MS = 60000
 // tabId → unscanned tail buffer for [[TASK:]] detection (consumed on match to prevent re-detection)
 const tabTaskScanBuf = new Map<string, string>()
+// Deduplicate task emissions within a session (cleared on session:load)
+const emittedTaskTitles = new Set<string>()
 
 // Strip ANSI/OSC escape codes and extract last meaningful line
 function extractLastLine(raw: string): string {
@@ -482,7 +484,11 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
       let lastMatchEnd = 0
       for (const match of stripped.matchAll(/\[\[TASK:\s*(.+?)\]\]/g)) {
         const title = match[1].trim()
-        if (title) mainWindow?.webContents.send('task:add', title)
+        const normalized = title.toLowerCase()
+        if (title && !emittedTaskTitles.has(normalized)) {
+          emittedTaskTitles.add(normalized)
+          mainWindow?.webContents.send('task:add', title)
+        }
         lastMatchEnd = match.index! + match[0].length
       }
       // Keep only the unmatched tail for split-chunk detection (max 100 chars)
@@ -639,6 +645,8 @@ function createWindow() {
     tabLastOutputAt.clear()
     tabLastInputAt.clear()
     tabTaskScanBuf.clear()
+    tabTaskCooldown.clear()
+    emittedTaskTitles.clear()
     for (const w of tabSessionWatchers.values()) clearInterval(w)
     tabSessionWatchers.clear()
     for (const w of tabGeminiSessionWatchers.values()) clearInterval(w)
@@ -777,6 +785,8 @@ function createWindow() {
           tabInfo.set(tabId, info)
           // Record the time the user sent input (used for sidebar ordering)
           tabLastInputAt.set(tabId, Date.now())
+          // Resume replay is over — user is now interacting, allow task detection
+          tabTaskCooldown.delete(tabId)
         }
       }
     } else if (data === '\x7f' || data === '\b') {
