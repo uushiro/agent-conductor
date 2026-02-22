@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useTasks } from '../hooks/useTasks'
 import { TaskItem } from './TaskItem'
 import type { TabInfo } from '../global'
@@ -22,6 +22,7 @@ export function Sidebar({ activeTabId, onTabSelect, onSendToAgent }: Props) {
   const [tabInfos, setTabInfos] = useState<TabInfo[]>([])
   const [flashTaskId, setFlashTaskId] = useState<string | null>(null)
   const [tooltip, setTooltip] = useState<{ text: string; top: number } | null>(null)
+  const tasksRef = useRef(tasks)
 
   const showTooltip = (e: React.MouseEvent<HTMLElement>, text: string) => {
     const el = e.currentTarget
@@ -31,9 +32,15 @@ export function Sidebar({ activeTabId, onTabSelect, onSendToAgent }: Props) {
   }
   const hideTooltip = () => setTooltip(null)
 
+  // Keep ref in sync for stable closure in onTaskAdd listener
+  tasksRef.current = tasks
+
   // Listen for tasks added from sessions
   useEffect(() => {
     return window.electronAPI.onTaskAdd((title) => {
+      const normalized = title.trim().toLowerCase()
+      const exists = tasksRef.current.some(t => t.title.trim().toLowerCase() === normalized)
+      if (exists) return
       const id = addTask(title)
       if (id) {
         setFlashTaskId(id)
@@ -115,7 +122,6 @@ export function Sidebar({ activeTabId, onTabSelect, onSendToAgent }: Props) {
             placeholder="Add a task..."
             className="task-input"
           />
-          <button type="submit" className="task-add-btn">+</button>
         </form>
 
         <div className="task-list">

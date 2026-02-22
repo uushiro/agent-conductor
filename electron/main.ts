@@ -36,6 +36,9 @@ const tabLastOutputAt = new Map<string, number>()
 const tabLastInputAt = new Map<string, number>()
 const tabSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
 const tabGeminiSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
+// tabId → timestamp until which [[TASK:]] detection is suppressed (resume replay window)
+const tabTaskCooldown = new Map<string, number>()
+const TASK_RESUME_COOLDOWN_MS = 15000
 
 // Strip ANSI/OSC escape codes and extract last meaningful line
 function extractLastLine(raw: string): string {
@@ -468,12 +471,15 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
     tabLastOutput.set(id, combined)
     tabLastOutputAt.set(id, Date.now())
 
-    // Detect [[TASK: ...]] pattern (scan overlap to handle chunk splits)
-    const scanBuf = prev.slice(-100) + data
-    const stripped = scanBuf.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\r/g, '')
-    for (const match of stripped.matchAll(/\[\[TASK:\s*(.+?)\]\]/g)) {
-      const title = match[1].trim()
-      if (title) mainWindow?.webContents.send('task:add', title)
+    // Detect [[TASK: ...]] pattern — skip during resume replay cooldown
+    const cooldownEnd = tabTaskCooldown.get(id) ?? 0
+    if (Date.now() > cooldownEnd) {
+      const scanBuf = prev.slice(-100) + data
+      const stripped = scanBuf.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\r/g, '')
+      for (const match of stripped.matchAll(/\[\[TASK:\s*(.+?)\]\]/g)) {
+        const title = match[1].trim()
+        if (title) mainWindow?.webContents.send('task:add', title)
+      }
     }
   })
 
@@ -728,6 +734,9 @@ function createWindow() {
           info.hadGemini = true
           tabInfo.set(tabId, info)
           startGeminiSessionWatch(tabId, info.cwd || HOME)
+          if (/--resume/.test(input)) {
+            tabTaskCooldown.set(tabId, Date.now() + TASK_RESUME_COOLDOWN_MS)
+          }
         }
 
         // Detect "claude" command being launched from shell → snapshot NOW before file is created
@@ -742,6 +751,8 @@ function createWindow() {
             info.claudeResumeParentId = resumeMatch[1]
             tabInfo.set(tabId, info)
             startSessionWatch(tabId, info.cwd || HOME)
+            // Suppress [[TASK:]] detection during resume replay
+            tabTaskCooldown.set(tabId, Date.now() + TASK_RESUME_COOLDOWN_MS)
           } else {
             info.claudeResumeParentId = null
             tabInfo.set(tabId, info)
