@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // Terminal lifecycle
-  createTerminal: (cwd?: string) => ipcRenderer.invoke('terminal:create', cwd) as Promise<string>,
+  createTerminal: (cwd?: string, pendingSessionId?: string) => ipcRenderer.invoke('terminal:create', cwd, pendingSessionId) as Promise<string>,
   closeTerminal: (tabId: string) => {
     ipcRenderer.send('terminal:close', tabId)
   },
@@ -37,7 +37,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Session persistence
   loadSession: () =>
-    ipcRenderer.invoke('session:load') as Promise<{ tabs: Array<{ issue: string; cwd: string }>; activeIndex: number } | null>,
+    ipcRenderer.invoke('session:load') as Promise<{ tabs: Array<{ issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null }>; activeIndex: number } | null>,
 
   // System info
   getGitBranch: () => ipcRenderer.invoke('git:branch'),

@@ -177,6 +177,11 @@ html, body, #root {
   font-family: 'SF Mono', 'Menlo', monospace;
 }
 
+.tab-last-output-thinking {
+  color: #4a9eff;
+  font-style: italic;
+}
+
 /* Active tab detail panel */
 .tab-detail-panel {
   padding: 0 12px 10px;

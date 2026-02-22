@@ -14,10 +14,11 @@ const SHELLS = new Set(['zsh', 'bash', 'fish', 'sh', 'login'])
 // Map of tabId → pty instance
 const ptyProcesses = new Map<string, ReturnType<typeof pty.spawn>>()
 const tabTimers = new Map<string, ReturnType<typeof setInterval>>()
-const tabInfo = new Map<string, { cwd: string; proc: string; issue: string; latestInput: string; claudeSessionId: string | null; hadClaude: boolean }>()
+const tabInfo = new Map<string, { cwd: string; proc: string; issue: string; latestInput: string; claudeSessionId: string | null; claudeResumeParentId: string | null; hadClaude: boolean }>()
 const tabInputBuf = new Map<string, string>()
 const tabLastOutput = new Map<string, string>()
 const tabLastOutputAt = new Map<string, number>()
+const tabLastInputAt = new Map<string, number>()
 const tabSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
 
 // Strip ANSI/OSC escape codes and extract last meaningful line
@@ -83,10 +84,22 @@ function saveSession() {
     const info = tabInfo.get(id)
     if (info) {
       const hadClaude = info.hadClaude
-      // Only save sessionId if the file has actual conversation content
-      const claudeSessionId = (hadClaude && info.claudeSessionId && sessionHasConversation(info.claudeSessionId, info.cwd || HOME))
-        ? info.claudeSessionId
-        : null
+      let claudeSessionId: string | null = null
+
+      if (hadClaude) {
+        // 1) Use the watcher-detected session if it has conversation content
+        if (info.claudeSessionId && sessionHasConversation(info.claudeSessionId, info.cwd || HOME)) {
+          claudeSessionId = info.claudeSessionId
+        } else if (info.claudeResumeParentId && sessionHasConversation(info.claudeResumeParentId, info.cwd || HOME)) {
+          // 2) Fallback: if this tab was restored via --resume and the continuation has
+          //    no new messages yet, keep the parent session ID so the next restart also
+          //    resumes from the same checkpoint (rather than starting fresh).
+          claudeSessionId = info.claudeResumeParentId
+        }
+        // If neither has conversation content, claudeSessionId stays null → next launch
+        // will start a fresh Claude session (correct behaviour for tabs with no history).
+      }
+
       tabs.push({
         issue: info.issue,
         cwd: info.cwd || HOME,
@@ -131,7 +144,10 @@ function getTabTitle(info: { proc: string; cwd: string; issue: string; latestInp
   return { issue: '', detail: `${info.proc} — ${dirName}` }
 }
 
-// Watch for a new Claude session file when Claude starts in a tab
+// Watch for the new JSONL file that Claude creates on startup.
+// Uses mtime-based detection: only considers files created after this watcher started.
+// The 3000ms stagger between tab restores (see TerminalTabs.tsx) ensures each tab's
+// file is in knownFiles before the next tab's watcher takes its snapshot.
 function startSessionWatch(tabId: string, cwd: string) {
   const existing = tabSessionWatchers.get(tabId)
   if (existing) { clearInterval(existing); tabSessionWatchers.delete(tabId) }
@@ -139,30 +155,35 @@ function startSessionWatch(tabId: string, cwd: string) {
   const encoded = cwd.replace(/\//g, '-')
   const sessionDir = path.join(HOME, '.claude', 'projects', encoded)
 
-  // Snapshot files that exist before Claude starts
+  // Snapshot of files that exist BEFORE Claude starts
   let knownFiles: Set<string>
   try {
     knownFiles = new Set(fs.readdirSync(sessionDir).filter((f: string) => f.endsWith('.jsonl')))
   } catch {
     knownFiles = new Set()
   }
+  const startTime = Date.now()
 
-  // Poll for the new .jsonl file Claude creates on startup
   const watcher = setInterval(() => {
     try {
       const current = fs.readdirSync(sessionDir).filter((f: string) => f.endsWith('.jsonl'))
-      for (const file of current) {
-        if (!knownFiles.has(file)) {
-          const sessionId = file.replace('.jsonl', '')
-          const info = tabInfo.get(tabId)
-          if (info) {
-            info.claudeSessionId = sessionId
-            tabInfo.set(tabId, info)
-          }
-          clearInterval(watcher)
-          tabSessionWatchers.delete(tabId)
-          return
-        }
+      const newFiles = current
+        .filter((f: string) => !knownFiles.has(f))
+        .map((f: string) => {
+          try {
+            const mtime = fs.statSync(path.join(sessionDir, f)).mtimeMs
+            return { file: f, mtime }
+          } catch { return null }
+        })
+        .filter((entry): entry is { file: string; mtime: number } => entry !== null && entry.mtime >= startTime - 500)
+        .sort((a, b) => a.mtime - b.mtime)
+
+      if (newFiles.length > 0) {
+        const sessionId = newFiles[0].file.replace('.jsonl', '')
+        const info = tabInfo.get(tabId)
+        if (info) { info.claudeSessionId = sessionId; tabInfo.set(tabId, info) }
+        clearInterval(watcher)
+        tabSessionWatchers.delete(tabId)
       }
     } catch { /* ignore */ }
   }, 1000)
@@ -171,7 +192,7 @@ function startSessionWatch(tabId: string, cwd: string) {
   setTimeout(() => {
     const w = tabSessionWatchers.get(tabId)
     if (w === watcher) { clearInterval(watcher); tabSessionWatchers.delete(tabId) }
-  }, 30000)
+  }, 60000)
 }
 
 // Check if a session file has actual conversation content
@@ -184,8 +205,42 @@ function sessionHasConversation(sessionId: string, cwd: string): boolean {
   } catch { return false }
 }
 
+// Read the last assistant response text from a session JSONL file (skips thinking blocks).
+// Reads only the last 5000 bytes for efficiency on large files.
+function getLastSessionText(sessionId: string | null, cwd: string): string {
+  if (!sessionId) return ''
+  try {
+    const encoded = cwd.replace(/\//g, '-')
+    const filePath = path.join(HOME, '.claude', 'projects', encoded, `${sessionId}.jsonl`)
+    const stat = fs.statSync(filePath)
+    const readSize = Math.min(5000, stat.size)
+    const buf = Buffer.alloc(readSize)
+    const fd = fs.openSync(filePath, 'r')
+    fs.readSync(fd, buf, 0, readSize, stat.size - readSize)
+    fs.closeSync(fd)
+    const lines = buf.toString('utf-8').split('\n').filter(l => l.trim())
+    // Iterate from last to first to find the most recent assistant text
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const entry = JSON.parse(lines[i])
+        if (entry.type === 'assistant') {
+          const content = entry.message?.content
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block.type === 'text' && block.text?.trim()) {
+                return block.text.slice(0, 120).replace(/\n+/g, ' ').trim()
+              }
+            }
+          }
+        }
+      } catch { /* incomplete JSON at start of read window, skip */ }
+    }
+  } catch { /* file not found or other error */ }
+  return ''
+}
+
 function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
-  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null }
+  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false }
   const prevProc = info.proc
 
   try {
@@ -203,6 +258,7 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
       // App → shell (only when previously running a real non-shell process): clear
       info.hadClaude = false
       info.claudeSessionId = null
+      info.claudeResumeParentId = null
       info.latestInput = ''
       tabInputBuf.delete(id)
     }
@@ -234,7 +290,7 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
   })
 
   ptyProcesses.set(id, ptyProcess)
-  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, hadClaude: false })
+  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false })
   tabOrder.push(id)
 
   // Relay pty output → renderer, and buffer last output for sidebar
@@ -274,8 +330,16 @@ function createWindow() {
   })
 
   // Create a new terminal tab (optional cwd)
-  ipcMain.handle('terminal:create', (_event, cwd?: string) => {
+  // pendingSessionId: if provided, pre-marks this tab as hadClaude=true with a resume fallback.
+  // This ensures saveSession() can recover the session ID even if the app exits before Claude starts.
+  ipcMain.handle('terminal:create', (_event, cwd?: string, pendingSessionId?: string) => {
     const { id } = spawnPty(cwd)
+    if (pendingSessionId) {
+      const info = tabInfo.get(id)!
+      info.hadClaude = true
+      info.claudeResumeParentId = pendingSessionId
+      tabInfo.set(id, info)
+    }
     return id
   })
 
@@ -295,16 +359,32 @@ function createWindow() {
     }
   })
 
-  // List all tab info (for sidebar), sorted by most recently active first
+  // List all tab info (for sidebar), sorted by most recently user-input first
   ipcMain.handle('terminal:list-info', () => {
     const now = Date.now()
     return [...tabOrder]
       .map((id) => {
         const info = tabInfo.get(id)
-        const lastOutput = extractLastLine(tabLastOutput.get(id) || '')
         const lastOutputAt = tabLastOutputAt.get(id) ?? 0
-        const active = (now - lastOutputAt) < 2000
-        if (!info) return { id, cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null, lastOutput: '', active, lastOutputAt }
+        const lastInputAt = tabLastInputAt.get(id) ?? 0
+        // "active" = PTY had output within the last 3 s (Claude is generating)
+        const active = (now - lastOutputAt) < 3000
+        const isClaudeRunning = !!info?.hadClaude && !!info?.proc && !SHELLS.has(info.proc)
+        const isThinking = isClaudeRunning && active
+
+        let lastOutput: string
+        if (isClaudeRunning && active) {
+          // Claude is actively generating — show current PTY output (tool calls, progress, etc.)
+          lastOutput = extractLastLine(tabLastOutput.get(id) || '')
+        } else if (isClaudeRunning) {
+          // Response complete — show last assistant text from JSONL (no thinking blocks)
+          lastOutput = getLastSessionText(info!.claudeSessionId, info!.cwd || HOME)
+            || extractLastLine(tabLastOutput.get(id) || '')
+        } else {
+          lastOutput = extractLastLine(tabLastOutput.get(id) || '')
+        }
+
+        if (!info) return { id, cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null, lastOutput: '', active, lastInputAt, isThinking: false }
         return {
           id,
           cwd: info.cwd,
@@ -314,10 +394,11 @@ function createWindow() {
           claudeSessionId: info.claudeSessionId,
           lastOutput,
           active,
-          lastOutputAt,
+          lastInputAt,
+          isThinking,
         }
       })
-      .sort((a, b) => b.lastOutputAt - a.lastOutputAt)
+      .sort((a, b) => b.lastInputAt - a.lastInputAt)
   })
 
   // Load saved session — clears all existing PTY state first to prevent tab accumulation on HMR reloads
@@ -333,6 +414,7 @@ function createWindow() {
     tabInputBuf.clear()
     tabLastOutput.clear()
     tabLastOutputAt.clear()
+    tabLastInputAt.clear()
     for (const w of tabSessionWatchers.values()) clearInterval(w)
     tabSessionWatchers.clear()
     tabOrder.length = 0
@@ -349,6 +431,7 @@ function createWindow() {
     tabInputBuf.delete(tabId)
     tabLastOutput.delete(tabId)
     tabLastOutputAt.delete(tabId)
+    tabLastInputAt.delete(tabId)
     const sw = tabSessionWatchers.get(tabId)
     if (sw) { clearInterval(sw); tabSessionWatchers.delete(tabId) }
     const idx = tabOrder.indexOf(tabId)
@@ -386,9 +469,14 @@ function createWindow() {
           // If resuming a specific session, save the ID directly
           const resumeMatch = input.match(/--resume\s+([a-f0-9-]{36})/)
           if (resumeMatch) {
+            // Save the parent session ID as fallback; watcher will update claudeSessionId
+            // to the new continuation file Claude creates on --resume
             info.claudeSessionId = resumeMatch[1]
+            info.claudeResumeParentId = resumeMatch[1]
             tabInfo.set(tabId, info)
+            startSessionWatch(tabId, info.cwd || HOME)
           } else {
+            info.claudeResumeParentId = null
             tabInfo.set(tabId, info)
             startSessionWatch(tabId, info.cwd || HOME)
           }
@@ -400,6 +488,8 @@ function createWindow() {
           if (!info.issue) info.issue = truncated
           info.latestInput = truncated
           tabInfo.set(tabId, info)
+          // Record the time the user sent input (used for sidebar ordering)
+          tabLastInputAt.set(tabId, Date.now())
         }
       }
     } else if (data === '\x7f' || data === '\b') {

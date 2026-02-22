@@ -33,7 +33,12 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
       const restored: Tab[] = []
       const claudeResumes: Array<{ tabId: string; sessionId: string | null }> = []
       for (const saved of session.tabs) {
-        const tabId = await window.electronAPI.createTerminal(saved.cwd)
+        // Pass pendingSessionId so hadClaude+claudeResumeParentId are set immediately,
+        // protecting against app exit before the staggered claude --resume fires.
+        const tabId = await window.electronAPI.createTerminal(
+          saved.cwd,
+          saved.hadClaude ? saved.claudeSessionId ?? undefined : undefined
+        )
         if (saved.issue) {
           await window.electronAPI.setTerminalIssue(tabId, saved.issue)
         }
@@ -51,12 +56,14 @@ export function TerminalTabs({ activeTabId, onActiveTabChange }: Props) {
       const activeIdx = Math.min(session.activeIndex, restored.length - 1)
       onActiveTabChange(restored[activeIdx]?.id || restored[0]?.id || '')
 
-      // Auto-resume claude in tabs that had it running, staggered to ensure unique session tracking
+      // Auto-resume claude in tabs that had it running.
+      // 3000ms stagger ensures each Claude creates its session file before the next
+      // tab's watcher takes its knownFiles snapshot, preventing cross-tab session mixing.
       claudeResumes.forEach(({ tabId, sessionId }, i) => {
         setTimeout(() => {
           const cmd = sessionId ? `claude --resume ${sessionId}\r` : 'claude\r'
           window.electronAPI.sendTerminalInput(tabId, cmd)
-        }, 1000 + i * 1500)
+        }, 1000 + i * 3000)
       })
     } else {
       createTab()

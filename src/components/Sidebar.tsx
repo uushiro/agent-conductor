@@ -60,7 +60,9 @@ export function Sidebar({ activeTabId, onTabSelect }: Props) {
                   {tab.issue || `Session ${idx + 1}`}
                 </span>
                 {tab.lastOutput && (
-                  <span className="tab-last-output">{tab.lastOutput}</span>
+                  <span className={`tab-last-output ${tab.isThinking ? 'tab-last-output-thinking' : ''}`}>
+                    {tab.lastOutput}
+                  </span>
                 )}
               </div>
             </div>

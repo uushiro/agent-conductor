@@ -7,6 +7,8 @@ export interface TabInfo {
   claudeSessionId: string | null
   lastOutput: string
   active: boolean
+  lastInputAt: number
+  isThinking: boolean
 }
 
 export interface SavedSession {
@@ -15,7 +17,7 @@ export interface SavedSession {
 }
 
 export interface ElectronAPI {
-  createTerminal: (cwd?: string) => Promise<string>
+  createTerminal: (cwd?: string, pendingSessionId?: string) => Promise<string>
   closeTerminal: (tabId: string) => void
   onTerminalData: (callback: (tabId: string, data: string) => void) => () => void
   sendTerminalInput: (tabId: string, data: string) => void
