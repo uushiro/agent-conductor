@@ -318,7 +318,7 @@ function createWindow() {
     height: 800,
     minWidth: 800,
     minHeight: 500,
-    title: 'Claude Cockpit',
+    title: 'Agent Conductor',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 15, y: 15 },
     backgroundColor: '#1a1a2e',
