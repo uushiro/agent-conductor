@@ -60,6 +60,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('task:add', listener)
   },
 
+  // Set all tasks at once (for external task management)
+  onTaskSetAll: (cb: (tasksJson: string) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, tasksJson: string) => cb(tasksJson)
+    ipcRenderer.on('task:set-all', listener)
+    return () => ipcRenderer.removeListener('task:set-all', listener)
+  },
+
   // Quit confirmation
   onQuitConfirm: (cb: () => void) => {
     const listener = () => cb()

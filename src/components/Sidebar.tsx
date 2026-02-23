@@ -17,7 +17,7 @@ function shortPath(cwd: string): string {
 }
 
 export function Sidebar({ activeTabId, onTabSelect, onSendToAgent }: Props) {
-  const { tasks, addTask, toggleTask, deleteTask } = useTasks()
+  const { tasks, addTask, toggleTask, deleteTask, setTasks } = useTasks()
   const [input, setInput] = useState('')
   const [tabInfos, setTabInfos] = useState<TabInfo[]>([])
   const [flashTaskId, setFlashTaskId] = useState<string | null>(null)
@@ -34,6 +34,16 @@ export function Sidebar({ activeTabId, onTabSelect, onSendToAgent }: Props) {
 
   // Keep ref in sync for stable closure in onTaskAdd listener
   tasksRef.current = tasks
+
+  // Listen for task list replacement (external task management)
+  useEffect(() => {
+    return window.electronAPI.onTaskSetAll((tasksJson) => {
+      try {
+        const newTasks = JSON.parse(tasksJson)
+        setTasks(newTasks)
+      } catch { /* ignore parse errors */ }
+    })
+  }, [setTasks])
 
   // Listen for tasks added from sessions
   useEffect(() => {

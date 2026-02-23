@@ -39,6 +39,7 @@ export interface ElectronAPI {
   removeClosedHistory: (sessionId: string) => void
   loadSession: () => Promise<SavedSession | null>
   onTaskAdd: (cb: (title: string) => void) => () => void
+  onTaskSetAll: (cb: (tasksJson: string) => void) => () => void
   onQuitConfirm: (cb: () => void) => () => void
   onQuitConfirmCancel: (cb: () => void) => () => void
   getGitBranch: () => Promise<string | null>

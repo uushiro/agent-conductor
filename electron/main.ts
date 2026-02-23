@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process'
 const pty = require('node-pty')
 
 let mainWindow: BrowserWindow | null = null
+let ipcHandlersRegistered = false
 let quitConfirmPending = false
 let quitConfirmTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -491,6 +492,14 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
         }
         lastMatchEnd = match.index! + match[0].length
       }
+      // Detect [[TASK-SETALL: ...json...]] pattern — replaces entire task list
+      for (const match of stripped.matchAll(/\[\[TASK-SETALL:\s*(.+?)\]\]/g)) {
+        try {
+          const tasksJson = match[1].trim()
+          mainWindow?.webContents.send('task:set-all', tasksJson)
+        } catch { /* ignore */ }
+        lastMatchEnd = match.index! + match[0].length
+      }
       // Keep only the unmatched tail for split-chunk detection (max 100 chars)
       tabTaskScanBuf.set(id, stripped.slice(Math.max(lastMatchEnd, stripped.length - 100)))
     }
@@ -522,6 +531,10 @@ function createWindow() {
       nodeIntegration: false,
     },
   })
+
+  // Register IPC handlers only once (guard against createWindow being called multiple times)
+  if (!ipcHandlersRegistered) {
+    ipcHandlersRegistered = true
 
   // Create a new terminal tab (optional cwd)
   // pendingSessionId: if provided, pre-marks this tab as hadClaude=true with a resume fallback.
@@ -832,6 +845,8 @@ function createWindow() {
   ipcMain.handle('system:cwd', async () => {
     return HOME
   })
+
+  } // end ipcHandlersRegistered guard
 
   if (VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(VITE_DEV_SERVER_URL)

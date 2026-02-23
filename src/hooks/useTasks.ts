@@ -49,5 +49,5 @@ export function useTasks() {
     setTasks((prev) => prev.filter((t) => t.id !== id))
   }, [])
 
-  return { tasks, addTask, toggleTask, deleteTask }
+  return { tasks, addTask, toggleTask, deleteTask, setTasks }
 }
