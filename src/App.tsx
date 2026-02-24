@@ -1,11 +1,13 @@
 import { useState, useEffect, useRef } from 'react'
 import { Sidebar } from './components/Sidebar'
+import { FileTreeSidebar } from './components/FileTreeSidebar'
 import { TerminalTabs, type TerminalTabsHandle } from './components/TerminalTabs'
 import { StatusBar } from './components/StatusBar'
 
 export function App() {
   const [activeTabId, setActiveTabId] = useState<string>('')
   const [showQuitConfirm, setShowQuitConfirm] = useState(false)
+  const [fileTreeVisible, setFileTreeVisible] = useState(true)
   const tabsRef = useRef<TerminalTabsHandle>(null)
 
   useEffect(() => {
@@ -26,7 +28,10 @@ export function App() {
           activeTabId={activeTabId}
           onTabSelect={setActiveTabId}
           onSendToAgent={(prompt, agent) => tabsRef.current?.sendToNewTab(prompt, agent)}
+          fileTreeVisible={fileTreeVisible}
+          onToggleFileTree={() => setFileTreeVisible((v) => !v)}
         />
+        <FileTreeSidebar activeTabId={activeTabId} visible={fileTreeVisible} />
         <TerminalTabs ref={tabsRef} activeTabId={activeTabId} onActiveTabChange={setActiveTabId} />
       </div>
       <StatusBar />

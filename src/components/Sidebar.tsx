@@ -8,6 +8,8 @@ interface Props {
   onTabSelect: (tabId: string) => void
   activeTabId: string
   onSendToAgent: (prompt: string, agent: 'claude' | 'gemini') => void
+  fileTreeVisible: boolean
+  onToggleFileTree: () => void
 }
 
 const HOME_RE = /^\/Users\/[^/]+/
@@ -16,7 +18,7 @@ function shortPath(cwd: string): string {
   return cwd.replace(HOME_RE, '~')
 }
 
-export function Sidebar({ activeTabId, onTabSelect, onSendToAgent }: Props) {
+export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, fileTreeVisible, onToggleFileTree }: Props) {
   const { tasks, addTask, toggleTask, deleteTask, setTasks } = useTasks()
   const [input, setInput] = useState('')
   const [tabInfos, setTabInfos] = useState<TabInfo[]>([])
@@ -83,8 +85,14 @@ export function Sidebar({ activeTabId, onTabSelect, onSendToAgent }: Props) {
       {/* Tab list */}
       <div className="sidebar-section">
         <div className="sidebar-header">
-          <h2>Sessions</h2>
-          <span className="task-count">{tabInfos.length}</span>
+          <span className="task-count" style={{ marginRight: 'auto', fontSize: 13 }}>{tabInfos.length} sessions</span>
+          <button
+            className={`sidebar-filetree-toggle${fileTreeVisible ? ' active' : ''}`}
+            onClick={onToggleFileTree}
+            title={fileTreeVisible ? 'Hide file tree' : 'Show file tree'}
+          >
+            🗂
+          </button>
         </div>
         <div className="tab-list-sidebar">
           {tabInfos.map((tab, idx) => (

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, clipboard } from 'electron'
 import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs'
@@ -844,6 +844,39 @@ function createWindow() {
   // Handle cwd request
   ipcMain.handle('system:cwd', async () => {
     return HOME
+  })
+
+  // ---- File tree ----
+  const HIDDEN_DIRS = new Set(['node_modules', '.git', '.next', 'dist', '.cache', '__pycache__'])
+
+  ipcMain.handle('fs:list-dir', async (_event, dirPath: string) => {
+    try {
+      const entries = fs.readdirSync(dirPath, { withFileTypes: true })
+      return entries
+        .filter((e) => {
+          if (e.isDirectory() && HIDDEN_DIRS.has(e.name)) return false
+          return true
+        })
+        .map((e) => ({
+          name: e.name,
+          path: path.join(dirPath, e.name),
+          isDir: e.isDirectory(),
+        }))
+        .sort((a, b) => {
+          if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
+          return a.name.localeCompare(b.name)
+        })
+    } catch {
+      return []
+    }
+  })
+
+  ipcMain.handle('fs:open-in-editor', async (_event, filePath: string) => {
+    await shell.openPath(filePath)
+  })
+
+  ipcMain.handle('clipboard:write', (_event, text: string) => {
+    clipboard.writeText(text)
   })
 
   } // end ipcHandlersRegistered guard

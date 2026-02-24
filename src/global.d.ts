@@ -1,3 +1,9 @@
+export interface FileEntry {
+  name: string
+  path: string
+  isDir: boolean
+}
+
 export interface ClosedTabEntry {
   issue: string
   cwd: string
@@ -44,6 +50,9 @@ export interface ElectronAPI {
   onQuitConfirmCancel: (cb: () => void) => () => void
   getGitBranch: () => Promise<string | null>
   getCwd: () => Promise<string>
+  listDir: (dirPath: string) => Promise<FileEntry[]>
+  openInEditor: (filePath: string) => Promise<void>
+  writeClipboard: (text: string) => void
 }
 
 declare global {

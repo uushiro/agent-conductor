@@ -82,4 +82,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // System info
   getGitBranch: () => ipcRenderer.invoke('git:branch'),
   getCwd: () => ipcRenderer.invoke('system:cwd'),
+
+  // File tree
+  listDir: (dirPath: string) =>
+    ipcRenderer.invoke('fs:list-dir', dirPath) as Promise<
+      Array<{ name: string; path: string; isDir: boolean }>
+    >,
+  openInEditor: (filePath: string) =>
+    ipcRenderer.invoke('fs:open-in-editor', filePath) as Promise<void>,
+  writeClipboard: (text: string) => ipcRenderer.invoke('clipboard:write', text),
 })
