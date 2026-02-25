@@ -8,6 +8,7 @@ import { useSettings } from '../contexts/SettingsContext'
 interface Props {
   activeTabId: string
   visible: boolean
+  width: number
 }
 
 interface ContextMenu {
@@ -16,7 +17,7 @@ interface ContextMenu {
   entry: FileEntry
 }
 
-export function FileTreeSidebar({ activeTabId, visible }: Props) {
+export function FileTreeSidebar({ activeTabId, visible, width }: Props) {
   const { lang } = useLang()
   const { editorCommand } = useSettings()
   const t = strings[lang]
@@ -174,7 +175,7 @@ export function FileTreeSidebar({ activeTabId, visible }: Props) {
   if (!visible) return null
 
   return (
-    <aside className="file-tree-sidebar">
+    <aside className="file-tree-sidebar" style={{ width, minWidth: width }}>
       {/* ヘッダー */}
       <div className="file-tree-header">
         <h2>Files</h2>

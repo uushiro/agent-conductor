@@ -6,6 +6,7 @@ interface Settings {
   theme: Theme
   fontSize: number
   editorCommand: string
+  customEditors: string[]
 }
 
 interface SettingsContextValue extends Settings {
@@ -15,7 +16,8 @@ interface SettingsContextValue extends Settings {
 const DEFAULTS: Settings = {
   theme: 'dark',
   fontSize: 14,
-  editorCommand: 'code',
+  editorCommand: '',
+  customEditors: [],
 }
 
 const STORAGE_KEY = 'agent-conductor-settings'

@@ -201,7 +201,7 @@ function startSessionWatch(tabId: string, cwd: string) {
             return { file: f, mtime }
           } catch { return null }
         })
-        .filter((entry): entry is { file: string; mtime: number } => entry !== null && entry.mtime >= startTime - 500)
+        .filter((entry): entry is { file: string; mtime: number } => entry !== null && entry.mtime >= startTime - 5000)
         .sort((a, b) => a.mtime - b.mtime)
 
       if (newFiles.length > 0) {

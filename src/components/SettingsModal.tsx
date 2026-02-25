@@ -1,3 +1,4 @@
+import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useSettings } from '../contexts/SettingsContext'
 import { useLang } from '../contexts/LangContext'
@@ -6,9 +7,45 @@ interface Props {
   onClose: () => void
 }
 
+const PRESET_EDITORS = [
+  { label: 'macOS Default', value: '' },
+  { label: 'code', value: 'code' },
+  { label: 'cursor', value: 'cursor' },
+  { label: 'vim', value: 'vim' },
+  { label: 'nvim', value: 'nvim' },
+  { label: 'subl', value: 'subl' },
+]
+
 export function SettingsModal({ onClose }: Props) {
-  const { theme, fontSize, editorCommand, updateSettings } = useSettings()
+  const { theme, fontSize, editorCommand, customEditors, updateSettings } = useSettings()
   const { lang, toggleLang } = useLang()
+  const [addingEditor, setAddingEditor] = useState(false)
+  const [addEditorValue, setAddEditorValue] = useState('')
+  const addInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (addingEditor) addInputRef.current?.focus()
+  }, [addingEditor])
+
+  const handleAddEditor = () => {
+    const val = addEditorValue.trim()
+    if (val) {
+      const isPreset = PRESET_EDITORS.some((p) => p.value === val)
+      const isCustom = customEditors.includes(val)
+      if (!isPreset && !isCustom) {
+        updateSettings({ customEditors: [...customEditors, val], editorCommand: val })
+      } else {
+        updateSettings({ editorCommand: val })
+      }
+    }
+    setAddEditorValue('')
+    setAddingEditor(false)
+  }
+
+  const allEditors = [
+    ...PRESET_EDITORS,
+    ...customEditors.map((v) => ({ label: v, value: v })),
+  ]
 
   return createPortal(
     <>
@@ -73,15 +110,41 @@ export function SettingsModal({ onClose }: Props) {
             </div>
           </div>
 
-          <div className="settings-row">
+          <div className="settings-row settings-row-editor">
             <label className="settings-label">Editor</label>
-            <input
-              type="text"
-              className="settings-editor-input"
-              value={editorCommand}
-              onChange={(e) => updateSettings({ editorCommand: e.target.value })}
-              placeholder="code"
-            />
+            <div className="settings-editor-chips">
+              {allEditors.map(({ label, value }) => (
+                <button
+                  key={value || '__default__'}
+                  className={`settings-toggle-btn${editorCommand === value ? ' active' : ''}`}
+                  onClick={() => updateSettings({ editorCommand: value })}
+                >
+                  {label}
+                </button>
+              ))}
+              {addingEditor ? (
+                <input
+                  ref={addInputRef}
+                  className="settings-editor-add-input"
+                  value={addEditorValue}
+                  onChange={(e) => setAddEditorValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleAddEditor()
+                    if (e.key === 'Escape') { setAddingEditor(false); setAddEditorValue('') }
+                  }}
+                  onBlur={() => { setAddingEditor(false); setAddEditorValue('') }}
+                  placeholder="command..."
+                />
+              ) : (
+                <button
+                  className="settings-editor-add-btn"
+                  onClick={() => setAddingEditor(true)}
+                  title="Add custom editor"
+                >
+                  +
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>

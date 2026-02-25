@@ -46,10 +46,7 @@ html, body, #root {
 
 /* Sidebar */
 .sidebar {
-  width: 260px;
-  min-width: 260px;
   background: var(--bg-sidebar);
-  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -270,6 +267,7 @@ html, body, #root {
   padding: 6px 8px;
   border-radius: 6px;
   transition: background 0.1s;
+  position: relative;
 }
 
 .task-item:hover {
@@ -312,11 +310,17 @@ html, body, #root {
 }
 
 .task-actions {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
   display: flex;
   align-items: center;
   gap: 2px;
   opacity: 0;
   transition: opacity 0.15s;
+  background: linear-gradient(to right, transparent, var(--bg-tertiary) 28%);
+  padding-left: 16px;
 }
 
 .task-item:hover .task-actions {
@@ -900,10 +904,7 @@ html, body, #root {
 /* ---- File Tree Sidebar ---- */
 
 .file-tree-sidebar {
-  width: 260px;
-  min-width: 260px;
   background: var(--bg-sidebar);
-  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -918,13 +919,14 @@ html, body, #root {
   padding: 2px 4px;
   border-radius: 4px;
   line-height: 1;
-  opacity: 0.4;
+  color: var(--accent);
+  opacity: 0.6;
   transition: opacity 0.15s, background 0.1s;
   flex-shrink: 0;
 }
 
 .sidebar-filetree-toggle:hover {
-  opacity: 0.85;
+  opacity: 1;
   background: var(--bg-tertiary);
 }
 
@@ -1326,4 +1328,72 @@ html, body, #root {
 
 .status-settings-btn:hover {
   color: var(--text-primary);
+}
+
+/* Editor chips */
+.settings-row-editor {
+  align-items: flex-start;
+}
+
+.settings-editor-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 1;
+}
+
+.settings-editor-add-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 14px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.settings-editor-add-btn:hover {
+  color: var(--text-primary);
+}
+
+.settings-editor-add-input {
+  height: 24px;
+  width: 84px;
+  background: var(--bg-primary);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 11px;
+  padding: 0 6px;
+  outline: none;
+  font-family: 'SF Mono', Menlo, monospace;
+}
+
+/* ===================== Resize handle ===================== */
+.resize-handle {
+  width: 5px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  position: relative;
+  background: transparent;
+  z-index: 10;
+}
+
+.resize-handle::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 1px;
+  background: var(--border);
+  transition: left 0.1s, width 0.1s, background 0.1s;
+}
+
+.resize-handle:hover::before {
+  left: 1px;
+  width: 3px;
+  background: var(--accent);
+  opacity: 0.6;
 }

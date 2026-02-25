@@ -10,6 +10,7 @@ interface Props {
   onSendToAgent: (prompt: string, agent: 'claude' | 'gemini') => void
   fileTreeVisible: boolean
   onToggleFileTree: () => void
+  width: number
 }
 
 const HOME_RE = /^\/Users\/[^/]+/
@@ -18,7 +19,7 @@ function shortPath(cwd: string): string {
   return cwd.replace(HOME_RE, '~')
 }
 
-export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, fileTreeVisible, onToggleFileTree }: Props) {
+export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, fileTreeVisible, onToggleFileTree, width }: Props) {
   const { tasks, addTask, toggleTask, deleteTask, editTask, setTasks } = useTasks()
   const [input, setInput] = useState('')
   const [tabInfos, setTabInfos] = useState<TabInfo[]>([])
@@ -81,7 +82,7 @@ export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, fileTreeVisib
   const completed = tasks.filter((t) => t.done)
 
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" style={{ width, minWidth: width }}>
       {/* Tab list */}
       <div className="sidebar-section">
         <div className="sidebar-header">
