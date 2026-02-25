@@ -230,12 +230,30 @@ export function SettingsModal({ onClose }: Props) {
           <details className="settings-help">
             <summary className="settings-help-summary">{t.help}</summary>
             <div className="settings-help-body">
-              <p>{t.helpTabs}</p>
-              <p>{t.helpSessions}</p>
-              <p>{t.helpSidebar}</p>
-              <p>{t.helpTasksFromClaude}</p>
-              <p>{t.helpFileTree}</p>
-              <p>{t.helpTerminal}</p>
+              <div className="settings-help-item">
+                <span className="settings-help-label">{lang === 'ja' ? 'タブ' : 'Tabs'}</span>
+                <p>{t.helpTabs}</p>
+              </div>
+              <div className="settings-help-item">
+                <span className="settings-help-label">{lang === 'ja' ? 'セッション' : 'Sessions'}</span>
+                <p>{t.helpSessions}</p>
+              </div>
+              <div className="settings-help-item">
+                <span className="settings-help-label">{lang === 'ja' ? 'サイドバー' : 'Sidebar'}</span>
+                <p>{t.helpSidebar}</p>
+              </div>
+              <div className="settings-help-item">
+                <span className="settings-help-label">{lang === 'ja' ? 'タスク連携' : 'Task Integration'}</span>
+                <p>{t.helpTasksFromClaude}</p>
+              </div>
+              <div className="settings-help-item">
+                <span className="settings-help-label">{lang === 'ja' ? 'ファイルツリー' : 'File Tree'}</span>
+                <p>{t.helpFileTree}</p>
+              </div>
+              <div className="settings-help-item">
+                <span className="settings-help-label">{lang === 'ja' ? 'ターミナル' : 'Terminal'}</span>
+                <p>{t.helpTerminal}</p>
+              </div>
             </div>
           </details>
         </div>
