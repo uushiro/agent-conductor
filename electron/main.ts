@@ -498,12 +498,18 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
         if (info) {
           info.claudeSessionId = null
           info.claudeResumeParentId = null
+          info.hadClaude = true
           tabInfo.set(id, info)
         }
         // Wait for error to finish printing, then retry with plain claude
         setTimeout(() => {
           const proc = ptyProcesses.get(id)
-          if (proc) proc.write('claude\r')
+          if (proc) {
+            proc.write('claude\r')
+            // Re-start session watcher so the fresh claude's session file gets detected
+            const cwd = info?.cwd || HOME
+            startSessionWatch(id, cwd)
+          }
         }, 1500)
       }
     }
