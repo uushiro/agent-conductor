@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useSettings } from '../contexts/SettingsContext'
-import { useLang } from '../contexts/LangContext'
+import { useLang, strings } from '../contexts/LangContext'
 
 interface Props {
   onClose: () => void
@@ -29,6 +29,7 @@ const PRESET_EDITORS = [
 export function SettingsModal({ onClose }: Props) {
   const { theme, fontSize, editorCommand, customEditors, accentColor, customColors, updateSettings } = useSettings()
   const { lang, toggleLang } = useLang()
+  const t = strings[lang]
   const [addingEditor, setAddingEditor] = useState(false)
   const [addEditorValue, setAddEditorValue] = useState('')
   const [addingColor, setAddingColor] = useState(false)
@@ -229,12 +230,12 @@ export function SettingsModal({ onClose }: Props) {
           <details className="settings-help">
             <summary className="settings-help-summary">Help</summary>
             <div className="settings-help-body">
-              <p><strong>Tabs</strong>: + to add (Claude/Gemini/Terminal). Double-click tab to rename. Drag to reorder. ↺ to restore closed tabs.</p>
-              <p><strong>Sessions</strong>: Auto-saved on quit, auto-resumed on launch. "Resuming..." shown while restoring.</p>
-              <p><strong>Sidebar</strong>: Session list with status dots (green=active). Task list below — add tasks, check to complete, double-click to edit. ▶ sends task to new agent tab.</p>
-              <p><strong>Tasks from Claude</strong>: Include <code>[[TASK: title]]</code> in Claude output to auto-add tasks.</p>
-              <p><strong>File Tree</strong>: Toggle with ▤. Auto-follows active tab's cwd. Click path to pin a directory. Right-click files for context menu.</p>
-              <p><strong>Terminal</strong>: Select text + Backspace to bulk-delete. Column widths are draggable and persisted.</p>
+              <p>{t.helpTabs}</p>
+              <p>{t.helpSessions}</p>
+              <p>{t.helpSidebar}</p>
+              <p>{t.helpTasksFromClaude}</p>
+              <p>{t.helpFileTree}</p>
+              <p>{t.helpTerminal}</p>
             </div>
           </details>
         </div>
