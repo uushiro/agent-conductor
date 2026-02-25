@@ -491,7 +491,7 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
         .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
         .replace(/\x1b\][^\x07\x1b]*\x07/g, '')
         .replace(/\r/g, '')
-      if (/No conversation found/i.test(stripped)) {
+      if (/No conversation found with session ID/i.test(stripped)) {
         clearTimeout(tabResumeWatch.get(id)!)
         tabResumeWatch.delete(id)
         const info = tabInfo.get(id)
