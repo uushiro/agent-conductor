@@ -44,6 +44,8 @@ const TASK_RESUME_COOLDOWN_MS = 60000
 const tabTaskScanBuf = new Map<string, string>()
 // Deduplicate task emissions within a session (cleared on session:load)
 const emittedTaskTitles = new Set<string>()
+// tabId → timeout handle while watching for --resume failure ("No conversation found")
+const tabResumeWatch = new Map<string, ReturnType<typeof setTimeout>>()
 
 // Strip ANSI/OSC escape codes and extract last meaningful line
 function extractLastLine(raw: string): string {
@@ -483,6 +485,29 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
     tabLastOutput.set(id, combined)
     tabLastOutputAt.set(id, Date.now())
 
+    // Detect --resume failure: "No conversation found" → fall back to fresh claude
+    if (tabResumeWatch.has(id)) {
+      const stripped = combined
+        .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+        .replace(/\x1b\][^\x07\x1b]*\x07/g, '')
+        .replace(/\r/g, '')
+      if (/No conversation found/i.test(stripped)) {
+        clearTimeout(tabResumeWatch.get(id)!)
+        tabResumeWatch.delete(id)
+        const info = tabInfo.get(id)
+        if (info) {
+          info.claudeSessionId = null
+          info.claudeResumeParentId = null
+          tabInfo.set(id, info)
+        }
+        // Wait for error to finish printing, then retry with plain claude
+        setTimeout(() => {
+          const proc = ptyProcesses.get(id)
+          if (proc) proc.write('claude\r')
+        }, 1500)
+      }
+    }
+
     // Detect [[TASK: ...]] pattern — skip during resume replay cooldown
     const cooldownEnd = tabTaskCooldown.get(id) ?? 0
     if (Date.now() > cooldownEnd) {
@@ -667,6 +692,8 @@ function createWindow() {
     tabTaskScanBuf.clear()
     tabTaskCooldown.clear()
     emittedTaskTitles.clear()
+    for (const t of tabResumeWatch.values()) clearTimeout(t)
+    tabResumeWatch.clear()
     for (const w of tabSessionWatchers.values()) clearInterval(w)
     tabSessionWatchers.clear()
     for (const w of tabGeminiSessionWatchers.values()) clearInterval(w)
@@ -790,6 +817,10 @@ function createWindow() {
             startSessionWatch(tabId, info.cwd || HOME)
             // Suppress [[TASK:]] detection during resume replay
             tabTaskCooldown.set(tabId, Date.now() + TASK_RESUME_COOLDOWN_MS)
+            // Watch for resume failure; auto-fallback to plain claude if detected
+            const prevWatch = tabResumeWatch.get(tabId)
+            if (prevWatch) clearTimeout(prevWatch)
+            tabResumeWatch.set(tabId, setTimeout(() => tabResumeWatch.delete(tabId), 15000))
           } else {
             info.claudeResumeParentId = null
             tabInfo.set(tabId, info)
