@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import type { FileEntry } from '../global'
 import { FileTreeNode } from './FileTreeNode'
+import { useLang, strings } from '../contexts/LangContext'
+import { useSettings } from '../contexts/SettingsContext'
 
 interface Props {
   activeTabId: string
@@ -15,6 +17,9 @@ interface ContextMenu {
 }
 
 export function FileTreeSidebar({ activeTabId, visible }: Props) {
+  const { lang } = useLang()
+  const { editorCommand } = useSettings()
+  const t = strings[lang]
   const [rootPath, setRootPath] = useState<string | null>(() =>
     localStorage.getItem('filetree-root') || null
   )
@@ -109,7 +114,7 @@ export function FileTreeSidebar({ activeTabId, visible }: Props) {
   }, [])
 
   const handleOpenInEditor = useCallback((filePath: string) => {
-    window.electronAPI.openInEditor(filePath)
+    window.electronAPI.openInEditor(filePath, editorCommand)
     setContextMenu(null)
   }, [])
 
@@ -255,7 +260,7 @@ export function FileTreeSidebar({ activeTabId, visible }: Props) {
       {/* コピートースト */}
       {copyToast && (
         <div className="file-tree-copy-toast">
-          ✓ パスをコピーしました
+          {t.copied}
         </div>
       )}
 
@@ -274,19 +279,19 @@ export function FileTreeSidebar({ activeTabId, visible }: Props) {
               className="file-tree-context-item"
               onClick={() => handleOpenInEditor(contextMenu.entry.path)}
             >
-              エディタで開く
+              {t.openInEditor}
             </button>
             <button
               className="file-tree-context-item"
               onClick={() => handleCopyPath(contextMenu.entry.path)}
             >
-              パスをコピー
+              {t.copyPath}
             </button>
             <button
               className="file-tree-context-item"
               onClick={() => handleSetAsRoot(contextMenu.entry)}
             >
-              ルートに設定
+              {t.setAsRoot}
             </button>
           </div>
         </>,

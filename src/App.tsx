@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
+import { useLang, strings } from './contexts/LangContext'
 import { Sidebar } from './components/Sidebar'
 import { FileTreeSidebar } from './components/FileTreeSidebar'
 import { TerminalTabs, type TerminalTabsHandle } from './components/TerminalTabs'
 import { StatusBar } from './components/StatusBar'
 
 export function App() {
+  const { lang } = useLang()
   const [activeTabId, setActiveTabId] = useState<string>('')
   const [showQuitConfirm, setShowQuitConfirm] = useState(false)
   const [fileTreeVisible, setFileTreeVisible] = useState(true)
@@ -20,7 +22,7 @@ export function App() {
     <div className="app">
       {showQuitConfirm && (
         <div className="quit-confirm-toast">
-          もう一度 <kbd>⌘Q</kbd> を押すと終了します
+          {strings[lang].quitConfirm}
         </div>
       )}
       <div className="main-content">

@@ -871,8 +871,14 @@ function createWindow() {
     }
   })
 
-  ipcMain.handle('fs:open-in-editor', async (_event, filePath: string) => {
-    await shell.openPath(filePath)
+  ipcMain.handle('fs:open-in-editor', async (_event, filePath: string, editorCommand?: string) => {
+    if (editorCommand && editorCommand.trim()) {
+      execFile(editorCommand, [filePath], (err) => {
+        if (err) shell.openPath(filePath)
+      })
+    } else {
+      await shell.openPath(filePath)
+    }
   })
 
   ipcMain.handle('clipboard:write', (_event, text: string) => {

@@ -19,7 +19,7 @@ function shortPath(cwd: string): string {
 }
 
 export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, fileTreeVisible, onToggleFileTree }: Props) {
-  const { tasks, addTask, toggleTask, deleteTask, setTasks } = useTasks()
+  const { tasks, addTask, toggleTask, deleteTask, editTask, setTasks } = useTasks()
   const [input, setInput] = useState('')
   const [tabInfos, setTabInfos] = useState<TabInfo[]>([])
   const [flashTaskId, setFlashTaskId] = useState<string | null>(null)
@@ -144,13 +144,13 @@ export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, fileTreeVisib
 
         <div className="task-list">
           {pending.map((task) => (
-            <TaskItem key={task.id} task={task} onToggle={toggleTask} onDelete={deleteTask} onSendToAgent={onSendToAgent} flash={flashTaskId === task.id} onShowTooltip={showTooltip} onHideTooltip={hideTooltip} />
+            <TaskItem key={task.id} task={task} onToggle={toggleTask} onDelete={deleteTask} onEdit={editTask} onSendToAgent={onSendToAgent} flash={flashTaskId === task.id} onShowTooltip={showTooltip} onHideTooltip={hideTooltip} />
           ))}
           {completed.length > 0 && (
             <>
               <div className="task-divider">Completed</div>
               {completed.map((task) => (
-                <TaskItem key={task.id} task={task} onToggle={toggleTask} onDelete={deleteTask} onSendToAgent={onSendToAgent} flash={false} onShowTooltip={showTooltip} onHideTooltip={hideTooltip} />
+                <TaskItem key={task.id} task={task} onToggle={toggleTask} onDelete={deleteTask} onEdit={editTask} onSendToAgent={onSendToAgent} flash={false} onShowTooltip={showTooltip} onHideTooltip={hideTooltip} />
               ))}
             </>
           )}

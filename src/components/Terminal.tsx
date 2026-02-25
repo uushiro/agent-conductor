@@ -6,9 +6,10 @@ import '@xterm/xterm/css/xterm.css'
 interface TerminalProps {
   tabId: string
   isActive: boolean
+  fontSize: number
 }
 
-export function Terminal({ tabId, isActive }: TerminalProps) {
+export function Terminal({ tabId, isActive, fontSize }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<XTerm | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
@@ -40,7 +41,7 @@ export function Terminal({ tabId, isActive }: TerminalProps) {
         brightCyan: '#56d364',
         brightWhite: '#f0f6fc',
       },
-      fontSize: 14,
+      fontSize: fontSize,
       fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
       cursorBlink: true,
       scrollback: 10000,
@@ -86,6 +87,14 @@ export function Terminal({ tabId, isActive }: TerminalProps) {
       term.dispose()
     }
   }, [tabId])
+
+  // Update font size dynamically
+  useEffect(() => {
+    if (terminalRef.current) {
+      terminalRef.current.options.fontSize = fontSize
+      fitAddonRef.current?.fit()
+    }
+  }, [fontSize])
 
   // Re-fit when becoming active (container may have resized while hidden)
   useEffect(() => {

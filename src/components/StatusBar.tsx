@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
 import { version } from '../../package.json'
+import { SettingsModal } from './SettingsModal'
 
 export function StatusBar() {
-  const [cwd, setCwd] = useState('')
   const [branch, setBranch] = useState<string | null>(null)
+  const [showSettings, setShowSettings] = useState(false)
 
   useEffect(() => {
-    window.electronAPI.getCwd().then(setCwd)
     window.electronAPI.getGitBranch().then(setBranch)
 
     // Refresh git branch every 10s
@@ -17,15 +17,16 @@ export function StatusBar() {
     return () => clearInterval(interval)
   }, [])
 
-  // Shorten home dir
-  const displayCwd = cwd.replace(/^\/Users\/[^/]+/, '~')
-
   return (
     <footer className="status-bar">
       <div className="status-left">
-        <span className="status-item">
-          {displayCwd}
-        </span>
+        <button
+          className="status-settings-btn"
+          onClick={() => setShowSettings(true)}
+          title="Settings"
+        >
+          ⚙
+        </button>
         {branch && (
           <span className="status-item">
             {branch}
@@ -35,6 +36,7 @@ export function StatusBar() {
       <div className="status-right">
         <span className="status-item">Agent Conductor v{version}</span>
       </div>
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     </footer>
   )
 }

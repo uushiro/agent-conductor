@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from 'react'
 import { Terminal } from './Terminal'
+import { useSettings } from '../contexts/SettingsContext'
 
 export interface TerminalTabsHandle {
   sendToNewTab: (prompt: string, agent: 'claude' | 'gemini') => void
@@ -26,6 +27,7 @@ interface Props {
 }
 
 export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function TerminalTabs({ activeTabId, onActiveTabChange }, ref) {
+  const { fontSize } = useSettings()
   const [tabs, setTabs] = useState<Tab[]>([])
   const [editingTabId, setEditingTabId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
@@ -473,6 +475,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
             key={tab.id}
             tabId={tab.id}
             isActive={tab.id === activeTabId}
+            fontSize={fontSize}
           />
         ))}
       </div>

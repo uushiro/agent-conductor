@@ -88,7 +88,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('fs:list-dir', dirPath) as Promise<
       Array<{ name: string; path: string; isDir: boolean }>
     >,
-  openInEditor: (filePath: string) =>
-    ipcRenderer.invoke('fs:open-in-editor', filePath) as Promise<void>,
+  openInEditor: (filePath: string, editorCommand?: string) =>
+    ipcRenderer.invoke('fs:open-in-editor', filePath, editorCommand) as Promise<void>,
   writeClipboard: (text: string) => ipcRenderer.invoke('clipboard:write', text),
 })

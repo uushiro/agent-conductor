@@ -51,7 +51,7 @@ export interface ElectronAPI {
   getGitBranch: () => Promise<string | null>
   getCwd: () => Promise<string>
   listDir: (dirPath: string) => Promise<FileEntry[]>
-  openInEditor: (filePath: string) => Promise<void>
+  openInEditor: (filePath: string, editorCommand?: string) => Promise<void>
   writeClipboard: (text: string) => void
 }
 
