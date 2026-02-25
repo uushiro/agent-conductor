@@ -353,6 +353,35 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     setEditingTabId(null)
   }
 
+  // Keyboard shortcuts: Cmd+1-9 switch tab, Cmd+Option+Left/Right navigate tabs
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!e.metaKey) return
+      // Cmd+1~9: switch to tab by index
+      if (e.key >= '1' && e.key <= '9') {
+        const idx = parseInt(e.key) - 1
+        const target = tabsRef.current[idx]
+        if (target) {
+          e.preventDefault()
+          onActiveTabChange(target.id)
+        }
+        return
+      }
+      // Cmd+Option+Left/Right: previous/next tab
+      if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        e.preventDefault()
+        const currentIdx = tabsRef.current.findIndex((t) => t.id === activeTabId)
+        if (currentIdx === -1) return
+        const nextIdx = e.key === 'ArrowLeft'
+          ? (currentIdx - 1 + tabsRef.current.length) % tabsRef.current.length
+          : (currentIdx + 1) % tabsRef.current.length
+        onActiveTabChange(tabsRef.current[nextIdx].id)
+      }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [activeTabId, onActiveTabChange])
+
   if (tabs.length === 0) {
     return null
   }
