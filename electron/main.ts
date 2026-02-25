@@ -112,17 +112,24 @@ function saveSession() {
       let claudeSessionId: string | null = null
 
       if (hadClaude) {
-        // 1) Use the watcher-detected session if it has conversation content
-        if (info.claudeSessionId && sessionHasConversation(info.claudeSessionId, info.cwd || HOME)) {
-          claudeSessionId = info.claudeSessionId
-        } else if (info.claudeResumeParentId && sessionHasConversation(info.claudeResumeParentId, info.cwd || HOME)) {
-          // 2) Fallback: if this tab was restored via --resume and the continuation has
-          //    no new messages yet, keep the parent session ID so the next restart also
-          //    resumes from the same checkpoint (rather than starting fresh).
-          claudeSessionId = info.claudeResumeParentId
+        if (info.claudeResumeParentId) {
+          // This session was started via --resume. The parent ID is the safe, resumable
+          // checkpoint. Continuation files created by claude --resume are not themselves
+          // directly resumable (claude returns "No conversation found").
+          if (sessionHasConversation(info.claudeResumeParentId, info.cwd || HOME)) {
+            claudeSessionId = info.claudeResumeParentId
+          } else if (info.claudeSessionId && sessionHasConversation(info.claudeSessionId, info.cwd || HOME)) {
+            // Parent missing/empty (edge case) → fall back to continuation
+            claudeSessionId = info.claudeSessionId
+          }
+        } else {
+          // Fresh session (not started via --resume): save the watcher-detected ID
+          if (info.claudeSessionId && sessionHasConversation(info.claudeSessionId, info.cwd || HOME)) {
+            claudeSessionId = info.claudeSessionId
+          }
         }
         // If neither has conversation content, claudeSessionId stays null → next launch
-        // will start a fresh Claude session (correct behaviour for tabs with no history).
+        // starts a fresh Claude session (correct behaviour for tabs with no history).
       }
 
       tabs.push({
@@ -201,7 +208,7 @@ function startSessionWatch(tabId: string, cwd: string) {
             return { file: f, mtime }
           } catch { return null }
         })
-        .filter((entry): entry is { file: string; mtime: number } => entry !== null && entry.mtime >= startTime - 5000)
+        .filter((entry): entry is { file: string; mtime: number } => entry !== null && entry.mtime >= startTime)
         .sort((a, b) => a.mtime - b.mtime)
 
       if (newFiles.length > 0) {

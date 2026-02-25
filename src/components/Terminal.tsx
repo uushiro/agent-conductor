@@ -57,6 +57,23 @@ export function Terminal({ tabId, isActive, fontSize }: TerminalProps) {
     terminalRef.current = term
     fitAddonRef.current = fitAddon
 
+    // Delete selected text in bulk (selection + Backspace/Delete)
+    term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type !== 'keydown') return true
+      if ((ev.key === 'Backspace' || ev.key === 'Delete') && term.hasSelection()) {
+        const selected = term.getSelection()
+        // Strip newlines (wrapped lines) and count characters
+        const count = selected.replace(/\r?\n/g, '').length
+        if (count > 0) {
+          // Backspace (\x7f) repeated for the selection length
+          window.electronAPI.sendTerminalInput(tabId, '\x7f'.repeat(count))
+        }
+        term.clearSelection()
+        return false
+      }
+      return true
+    })
+
     // Relay keyboard input → main process (with tabId)
     term.onData((data) => {
       window.electronAPI.sendTerminalInput(tabId, data)
