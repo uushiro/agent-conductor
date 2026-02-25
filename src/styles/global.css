@@ -1394,22 +1394,19 @@ html, body, #root {
   font-family: 'SF Mono', Menlo, monospace;
 }
 
-/* ===================== Help section ===================== */
-.settings-divider {
-  border-top: 1px solid var(--border);
-  margin: 8px 0;
-}
-
-.settings-help-summary {
-  cursor: pointer;
-  font-size: 11px;
-  color: var(--text-secondary);
-  padding: 4px 0;
-  user-select: none;
-}
-
-.settings-help-summary:hover {
-  color: var(--text-primary);
+/* ===================== Help modal ===================== */
+.help-modal {
+  position: fixed;
+  bottom: 32px;
+  left: 8px;
+  width: 340px;
+  max-height: 480px;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  z-index: 900;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
 }
 
 .settings-help-body {
