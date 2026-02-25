@@ -71,7 +71,11 @@ export function FileTreeNode({
       } else {
         onExpand(entry.path)
       }
-    } else {
+    }
+  }
+
+  const handleDoubleClick = () => {
+    if (!entry.isDir) {
       onFileClick(entry)
     }
   }
@@ -85,6 +89,7 @@ export function FileTreeNode({
         className="file-tree-node"
         style={{ paddingLeft: 8 + depth * 12 }}
         onClick={handleClick}
+        onDoubleClick={handleDoubleClick}
         onContextMenu={(e) => onContextMenu(e, entry)}
       >
         {entry.isDir ? (

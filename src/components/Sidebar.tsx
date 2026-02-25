@@ -92,7 +92,10 @@ export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, fileTreeVisib
             onClick={onToggleFileTree}
             title={fileTreeVisible ? 'Hide file tree' : 'Show file tree'}
           >
-            ▤
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M2 3h4l2 2h6v8H2V3z" />
+              <path d="M6 8h4M6 10.5h4" />
+            </svg>
           </button>
         </div>
         <div className="tab-list-sidebar">
