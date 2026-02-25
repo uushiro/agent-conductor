@@ -1322,17 +1322,18 @@ html, body, #root {
 .status-settings-btn {
   background: none;
   border: none;
-  color: var(--text-secondary);
+  color: #fff;
   cursor: pointer;
   font-size: 14px;
   padding: 0 4px;
   line-height: 1;
   display: flex;
   align-items: center;
+  opacity: 0.85;
 }
 
 .status-settings-btn:hover {
-  color: var(--text-primary);
+  opacity: 1;
 }
 
 /* Editor chips */

@@ -8,12 +8,13 @@ interface Props {
 }
 
 const PRESET_COLORS = [
+  { label: 'Red', value: '#e8383d' },
+  { label: 'Orange', value: '#f5a623' },
+  { label: 'Yellow', value: '#ffd700' },
+  { label: 'Green', value: '#2ecc71' },
   { label: 'Blue', value: '#58a6ff' },
-  { label: 'Green', value: '#3fb950' },
-  { label: 'Purple', value: '#bc8cff' },
-  { label: 'Orange', value: '#d29922' },
-  { label: 'Pink', value: '#f778ba' },
-  { label: 'Red', value: '#ff7b72' },
+  { label: 'Purple', value: '#9b59b6' },
+  { label: 'Pink', value: '#ff69b4' },
 ]
 
 const PRESET_EDITORS = [
