@@ -135,8 +135,8 @@ export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, fileTreeVisib
 {/* Task list */}
       <div className="sidebar-section sidebar-section-grow">
         <div className="sidebar-header">
-          <h2>Tasks</h2>
-          <span className="task-count">{pending.length} remaining</span>
+          <h2>{t.tasks}</h2>
+          <span className="task-count">{lang === 'ja' ? `${pending.length}${t.remaining}` : `${pending.length} ${t.remaining}`}</span>
         </div>
 
         <form className="task-form" onSubmit={handleSubmit}>

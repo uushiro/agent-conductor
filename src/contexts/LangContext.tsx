@@ -33,6 +33,8 @@ export const strings = {
     cancel: 'キャンセル',
     restoreTab: '最近閉じたタブを復元',
     addTask: 'タスクを追加...',
+    tasks: 'タスク',
+    remaining: '件 残り',
   },
   en: {
     openInEditor: 'Open in Editor',
@@ -64,6 +66,8 @@ export const strings = {
     cancel: 'Cancel',
     restoreTab: 'Restore recently closed tab',
     addTask: 'Add a task...',
+    tasks: 'Tasks',
+    remaining: 'remaining',
   },
 } satisfies Record<Lang, Record<string, string>>
 
