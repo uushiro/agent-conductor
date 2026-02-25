@@ -23,6 +23,7 @@ export interface TabInfo {
   active: boolean
   lastInputAt: number
   isThinking: boolean
+  isResuming: boolean
 }
 
 export interface SavedSession {

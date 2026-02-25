@@ -20,7 +20,7 @@ const tabTimers = new Map<string, ReturnType<typeof setInterval>>()
 const tabInfo = new Map<string, {
   cwd: string; proc: string; issue: string; latestInput: string
   claudeSessionId: string | null; claudeResumeParentId: string | null; hadClaude: boolean
-  hadGemini: boolean; geminiSessionFile: string | null
+  hadGemini: boolean; geminiSessionFile: string | null; resuming: boolean
 }>()
 
 interface ClosedTabEntry {
@@ -107,15 +107,11 @@ function getRecentClaudeSessions(cwd: string): string[] {
 
 function saveSession() {
   const tabs: SavedTab[] = []
-  // Debug log for session save diagnostics
-  const debugLines: string[] = [`saveSession at ${new Date().toISOString()}`]
   for (const id of tabOrder) {
     const info = tabInfo.get(id)
     if (info) {
       const hadClaude = info.hadClaude
       let claudeSessionId: string | null = null
-
-      debugLines.push(`[${id}] issue="${info.issue}" hadClaude=${hadClaude} parentId=${info.claudeResumeParentId} sessionId=${info.claudeSessionId} cwd=${info.cwd}`)
 
       if (hadClaude) {
         if (info.claudeResumeParentId) {
@@ -148,8 +144,6 @@ function saveSession() {
         }
       }
 
-      debugLines.push(`  → saved claudeSessionId=${claudeSessionId}`)
-
       tabs.push({
         issue: info.issue,
         cwd: info.cwd || HOME,
@@ -162,8 +156,6 @@ function saveSession() {
   const session: SavedSession = { tabs: tabs.slice(0, 15), activeIndex: 0 }
   try {
     fs.writeFileSync(SESSION_FILE, JSON.stringify(session), 'utf-8')
-    // Write debug log next to session file
-    fs.writeFileSync(SESSION_FILE.replace('.json', '-debug.log'), debugLines.join('\n'), 'utf-8')
   } catch { /* ignore */ }
 }
 
@@ -435,7 +427,7 @@ function extractClaudeAction(raw: string): string {
 }
 
 function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
-  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false }
+  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGemini: false, geminiSessionFile: null as string | null, resuming: false }
   const prevProc = info.proc
 
   try {
@@ -450,6 +442,7 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
       // Shell → agent: mark appropriate flag (session watch started at input time)
       if (info.proc === 'claude') info.hadClaude = true
       if (info.proc === 'gemini') info.hadGemini = true
+      info.resuming = false
     } else if (prevProc !== '' && !SHELLS.has(prevProc) && SHELLS.has(info.proc)) {
       // Agent → shell: clear agent state
       if (prevProc === 'claude') {
@@ -492,7 +485,7 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
   })
 
   ptyProcesses.set(id, ptyProcess)
-  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null })
+  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null, resuming: false })
   tabOrder.push(id)
 
   // Relay pty output → renderer, and buffer last output for sidebar
@@ -601,6 +594,7 @@ function createWindow() {
       const info = tabInfo.get(id)!
       info.hadClaude = true
       info.claudeResumeParentId = pendingSessionId
+      info.resuming = true
       tabInfo.set(id, info)
     }
     return id
@@ -682,7 +676,7 @@ function createWindow() {
           lastOutput = extractLastLine(tabLastOutput.get(id) || '')
         }
 
-        if (!info) return { id, cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null, lastOutput: '', active, lastInputAt, isThinking: false }
+        if (!info) return { id, cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null, lastOutput: '', active, lastInputAt, isThinking: false, isResuming: false }
         return {
           id,
           cwd: info.cwd,
@@ -694,6 +688,7 @@ function createWindow() {
           active,
           lastInputAt,
           isThinking,
+          isResuming: info.resuming,
         }
       })
       .sort((a, b) => b.lastInputAt - a.lastInputAt)

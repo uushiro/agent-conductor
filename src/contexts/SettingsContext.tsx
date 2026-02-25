@@ -7,6 +7,8 @@ interface Settings {
   fontSize: number
   editorCommand: string
   customEditors: string[]
+  accentColor: string
+  customColors: string[]
 }
 
 interface SettingsContextValue extends Settings {
@@ -18,6 +20,8 @@ const DEFAULTS: Settings = {
   fontSize: 14,
   editorCommand: '',
   customEditors: [],
+  accentColor: '#58a6ff',
+  customColors: [],
 }
 
 const STORAGE_KEY = 'agent-conductor-settings'
@@ -42,11 +46,13 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
     document.documentElement.dataset.theme = settings.theme
+    document.documentElement.style.setProperty('--accent', settings.accentColor)
   }, [settings])
 
-  // Apply theme on initial render (before first effect)
+  // Apply theme + accent on initial render (before first effect)
   useEffect(() => {
     document.documentElement.dataset.theme = settings.theme
+    document.documentElement.style.setProperty('--accent', settings.accentColor)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateSettings = (patch: Partial<Settings>) => {

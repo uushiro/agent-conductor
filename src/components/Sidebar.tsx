@@ -111,13 +111,13 @@ export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, fileTreeVisib
                 >
                   {tab.issue || `Session ${idx + 1}`}
                 </span>
-                {tab.lastOutput && (
+                {(tab.lastOutput || tab.isResuming) && (
                   <span
-                    className={`tab-last-output ${tab.isThinking ? 'tab-last-output-thinking' : ''}`}
-                    onMouseEnter={(e) => showTooltip(e, tab.lastOutput)}
+                    className={`tab-last-output ${tab.isThinking || tab.isResuming ? 'tab-last-output-thinking' : ''}`}
+                    onMouseEnter={(e) => showTooltip(e, tab.isResuming ? 'Resuming...' : tab.lastOutput)}
                     onMouseLeave={hideTooltip}
                   >
-                    {tab.lastOutput}
+                    {tab.isResuming ? 'Resuming...' : tab.lastOutput}
                   </span>
                 )}
               </div>

@@ -11,6 +11,7 @@ interface Tab {
   issue: string
   detail: string
   customIssue: boolean
+  resuming: boolean
 }
 
 interface ClosedEntry {
@@ -71,11 +72,13 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         } else if (saved.hadGemini) {
           geminiResumes.push({ tabId })
         }
+        const willResume = saved.hadClaude || saved.hadGemini
         restored.push({
           id: tabId,
           issue: saved.issue,
-          detail: '',
+          detail: willResume ? 'Resuming...' : '',
           customIssue: !!saved.issue,
+          resuming: willResume,
         })
       }
       setTabs(restored)
@@ -107,7 +110,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     tabsRef.current = tabs
   }, [tabs])
 
-  // Poll tab titles from main process
+  // Poll tab titles from main process + clear resuming state when agent starts
   useEffect(() => {
     const interval = setInterval(() => {
       for (const tab of tabsRef.current) {
@@ -115,9 +118,12 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
           setTabs((current) =>
             current.map((t) => {
               if (t.id !== tab.id) return t
+              // Clear resuming state once agent has produced real output
+              const stillResuming = t.resuming && (!detail || detail === 'Resuming...')
               const newIssue = t.customIssue ? t.issue : issue
-              if (newIssue === t.issue && detail === t.detail) return t
-              return { ...t, issue: newIssue, detail }
+              const newDetail = stillResuming ? 'Resuming...' : detail
+              if (newIssue === t.issue && newDetail === t.detail && stillResuming === t.resuming) return t
+              return { ...t, issue: newIssue, detail: newDetail, resuming: stillResuming }
             })
           )
         })
@@ -189,7 +195,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     const tabId = await window.electronAPI.createTerminal()
     setTabs((prev) => [
       ...prev,
-      { id: tabId, issue: '', detail: 'Terminal', customIssue: false },
+      { id: tabId, issue: '', detail: 'Terminal', customIssue: false, resuming: false },
     ])
     onActiveTabChange(tabId)
     if (agent !== 'terminal') {
@@ -261,7 +267,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       }
       setTabs((prev) => [
         ...prev,
-        { id: tabId, issue: entry.issue, detail: '', customIssue: !!entry.issue },
+        { id: tabId, issue: entry.issue, detail: '', customIssue: !!entry.issue, resuming: false },
       ])
       onActiveTabChange(tabId)
       setTimeout(() => {
@@ -378,7 +384,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
               ) : (
                 <div className="tab-labels">
                   {tab.issue && <span className="tab-issue">{tab.issue}</span>}
-                  <span className="tab-detail">{tab.detail}</span>
+                  <span className={`tab-detail ${tab.resuming ? 'tab-detail-resuming' : ''}`}>{tab.detail}</span>
                 </div>
               )}
               {tabs.length > 1 && editingTabId !== tab.id && (

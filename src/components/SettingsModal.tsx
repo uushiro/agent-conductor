@@ -7,6 +7,15 @@ interface Props {
   onClose: () => void
 }
 
+const PRESET_COLORS = [
+  { label: 'Blue', value: '#58a6ff' },
+  { label: 'Green', value: '#3fb950' },
+  { label: 'Purple', value: '#bc8cff' },
+  { label: 'Orange', value: '#d29922' },
+  { label: 'Pink', value: '#f778ba' },
+  { label: 'Red', value: '#ff7b72' },
+]
+
 const PRESET_EDITORS = [
   { label: 'macOS Default', value: '' },
   { label: 'code', value: 'code' },
@@ -17,15 +26,22 @@ const PRESET_EDITORS = [
 ]
 
 export function SettingsModal({ onClose }: Props) {
-  const { theme, fontSize, editorCommand, customEditors, updateSettings } = useSettings()
+  const { theme, fontSize, editorCommand, customEditors, accentColor, customColors, updateSettings } = useSettings()
   const { lang, toggleLang } = useLang()
   const [addingEditor, setAddingEditor] = useState(false)
   const [addEditorValue, setAddEditorValue] = useState('')
+  const [addingColor, setAddingColor] = useState(false)
+  const [addColorValue, setAddColorValue] = useState('')
   const addInputRef = useRef<HTMLInputElement>(null)
+  const addColorRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (addingEditor) addInputRef.current?.focus()
   }, [addingEditor])
+
+  useEffect(() => {
+    if (addingColor) addColorRef.current?.focus()
+  }, [addingColor])
 
   const handleAddEditor = () => {
     const val = addEditorValue.trim()
@@ -41,6 +57,26 @@ export function SettingsModal({ onClose }: Props) {
     setAddEditorValue('')
     setAddingEditor(false)
   }
+
+  const handleAddColor = () => {
+    const val = addColorValue.trim()
+    if (val && /^#[0-9a-fA-F]{3,8}$/.test(val)) {
+      const isPreset = PRESET_COLORS.some((p) => p.value.toLowerCase() === val.toLowerCase())
+      const isCustom = customColors.includes(val)
+      if (!isPreset && !isCustom) {
+        updateSettings({ customColors: [...customColors, val], accentColor: val })
+      } else {
+        updateSettings({ accentColor: val })
+      }
+    }
+    setAddColorValue('')
+    setAddingColor(false)
+  }
+
+  const allColors = [
+    ...PRESET_COLORS,
+    ...customColors.map((v) => ({ label: v, value: v })),
+  ]
 
   const allEditors = [
     ...PRESET_EDITORS,
@@ -107,6 +143,46 @@ export function SettingsModal({ onClose }: Props) {
               >
                 JA
               </button>
+            </div>
+          </div>
+
+          <div className="settings-row settings-row-editor">
+            <label className="settings-label">Accent Color</label>
+            <div className="settings-editor-chips">
+              {allColors.map(({ label, value }) => (
+                <button
+                  key={value}
+                  className={`settings-color-chip${accentColor === value ? ' active' : ''}`}
+                  onClick={() => updateSettings({ accentColor: value })}
+                  title={label}
+                  style={{ '--chip-color': value } as React.CSSProperties}
+                >
+                  <span className="settings-color-dot" />
+                  {label}
+                </button>
+              ))}
+              {addingColor ? (
+                <input
+                  ref={addColorRef}
+                  className="settings-editor-add-input"
+                  value={addColorValue}
+                  onChange={(e) => setAddColorValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleAddColor()
+                    if (e.key === 'Escape') { setAddingColor(false); setAddColorValue('') }
+                  }}
+                  onBlur={() => { setAddingColor(false); setAddColorValue('') }}
+                  placeholder="#hex..."
+                />
+              ) : (
+                <button
+                  className="settings-editor-add-btn"
+                  onClick={() => setAddingColor(true)}
+                  title="Add custom color"
+                >
+                  +
+                </button>
+              )}
             </div>
           </div>
 
