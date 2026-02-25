@@ -33,7 +33,7 @@ export function StatusBar() {
           ⚙
         </button>
         <button
-          className="status-settings-btn"
+          className="status-help-btn"
           onClick={() => setShowHelp(v => !v)}
           title={t.help}
         >

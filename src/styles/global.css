@@ -1342,12 +1342,29 @@ html, body, #root {
   border: none;
   color: #fff;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 16px;
   padding: 0 4px;
   line-height: 1;
   display: flex;
   align-items: center;
   opacity: 0.85;
+}
+
+.status-help-btn {
+  background: none;
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 4px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  opacity: 0.85;
+}
+
+.status-help-btn:hover {
+  opacity: 1;
 }
 
 .status-settings-btn:hover {
@@ -1413,7 +1430,7 @@ html, body, #root {
   font-size: 11px;
   color: var(--text-secondary);
   line-height: 1.7;
-  padding: 6px 0;
+  padding: 6px 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
