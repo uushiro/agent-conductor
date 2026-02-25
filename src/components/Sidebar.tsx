@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useTasks } from '../hooks/useTasks'
 import { TaskItem } from './TaskItem'
+import { useLang, strings } from '../contexts/LangContext'
 import type { TabInfo } from '../global'
 
 
@@ -20,6 +21,8 @@ function shortPath(cwd: string): string {
 }
 
 export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, fileTreeVisible, onToggleFileTree, width }: Props) {
+  const { lang } = useLang()
+  const t = strings[lang]
   const { tasks, addTask, toggleTask, deleteTask, editTask, setTasks } = useTasks()
   const [input, setInput] = useState('')
   const [tabInfos, setTabInfos] = useState<TabInfo[]>([])
@@ -86,7 +89,7 @@ export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, fileTreeVisib
       {/* Tab list */}
       <div className="sidebar-section">
         <div className="sidebar-header">
-          <span className="task-count" style={{ marginRight: 'auto', fontSize: 13 }}>{tabInfos.length} sessions</span>
+          <span className="task-count" style={{ marginRight: 'auto', fontSize: 13 }}>{tabInfos.length} {t.sessions}</span>
           <button
             className={`sidebar-filetree-toggle${fileTreeVisible ? ' active' : ''}`}
             onClick={onToggleFileTree}
@@ -141,7 +144,7 @@ export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, fileTreeVisib
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Add a task..."
+            placeholder={t.addTask}
             className="task-input"
           />
         </form>

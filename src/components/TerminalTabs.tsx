@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from 'react'
 import { Terminal } from './Terminal'
 import { useSettings } from '../contexts/SettingsContext'
+import { useLang, strings } from '../contexts/LangContext'
 
 export interface TerminalTabsHandle {
   sendToNewTab: (prompt: string, agent: 'claude' | 'gemini') => void
@@ -29,6 +30,8 @@ interface Props {
 
 export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function TerminalTabs({ activeTabId, onActiveTabChange }, ref) {
   const { fontSize } = useSettings()
+  const { lang } = useLang()
+  const t = strings[lang]
   const [tabs, setTabs] = useState<Tab[]>([])
   const [editingTabId, setEditingTabId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
@@ -468,7 +471,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
             <button
               className="tab-restore-btn"
               onClick={() => setShowRestoreMenu((v) => !v)}
-              title="最近閉じたタブを復元"
+              title={t.restoreTab}
               disabled={closedHistory.length === 0}
             >
               ↺
@@ -492,7 +495,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       </div>
       {confirmClose && (
         <div className="tab-confirm-bar">
-          <span>「{confirmClose.issue}」を閉じますか？後で復元できます。</span>
+          <span>「{confirmClose.issue}{t.closeConfirm}</span>
           <button
             className="tab-confirm-btn-close"
             onClick={() => {
@@ -500,13 +503,13 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
               setConfirmClose(null)
             }}
           >
-            閉じる
+            {t.close}
           </button>
           <button
             className="tab-confirm-btn-cancel"
             onClick={() => setConfirmClose(null)}
           >
-            キャンセル
+            {t.cancel}
           </button>
         </div>
       )}

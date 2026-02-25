@@ -93,12 +93,12 @@ export function SettingsModal({ onClose }: Props) {
       />
       <div className="settings-modal">
         <div className="settings-header">
-          <span className="settings-title">Settings</span>
+          <span className="settings-title">{t.settings}</span>
           <button className="settings-close" onClick={onClose}>×</button>
         </div>
         <div className="settings-body">
           <div className="settings-row">
-            <label className="settings-label">Theme</label>
+            <label className="settings-label">{t.theme}</label>
             <div className="settings-toggle-group">
               <button
                 className={`settings-toggle-btn${theme === 'dark' ? ' active' : ''}`}
@@ -116,7 +116,7 @@ export function SettingsModal({ onClose }: Props) {
           </div>
 
           <div className="settings-row">
-            <label className="settings-label">Font Size</label>
+            <label className="settings-label">{t.fontSize}</label>
             <div className="settings-font-row">
               <input
                 type="range"
@@ -131,7 +131,7 @@ export function SettingsModal({ onClose }: Props) {
           </div>
 
           <div className="settings-row">
-            <label className="settings-label">Language</label>
+            <label className="settings-label">{t.language}</label>
             <div className="settings-toggle-group">
               <button
                 className={`settings-toggle-btn${lang === 'en' ? ' active' : ''}`}
@@ -149,7 +149,7 @@ export function SettingsModal({ onClose }: Props) {
           </div>
 
           <div className="settings-row settings-row-editor">
-            <label className="settings-label">Accent Color</label>
+            <label className="settings-label">{t.accentColor}</label>
             <div className="settings-editor-chips">
               {allColors.map(({ label, value }) => (
                 <button
@@ -189,7 +189,7 @@ export function SettingsModal({ onClose }: Props) {
           </div>
 
           <div className="settings-row settings-row-editor">
-            <label className="settings-label">Editor</label>
+            <label className="settings-label">{t.editor}</label>
             <div className="settings-editor-chips">
               {allEditors.map(({ label, value }) => (
                 <button
@@ -228,7 +228,7 @@ export function SettingsModal({ onClose }: Props) {
           <div className="settings-divider" />
 
           <details className="settings-help">
-            <summary className="settings-help-summary">Help</summary>
+            <summary className="settings-help-summary">{t.help}</summary>
             <div className="settings-help-body">
               <p>{t.helpTabs}</p>
               <p>{t.helpSessions}</p>

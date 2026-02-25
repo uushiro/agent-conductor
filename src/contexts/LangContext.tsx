@@ -9,12 +9,30 @@ export const strings = {
     setAsRoot: 'ルートに設定',
     copied: '✓ パスをコピーしました',
     quitConfirm: 'もう一度 ⌘Q を押すと終了します',
+    // Settings labels
+    settings: '設定',
+    theme: 'テーマ',
+    fontSize: 'フォントサイズ',
+    language: '言語',
+    accentColor: 'アクセントカラー',
+    editor: 'エディタ',
+    help: 'ヘルプ',
+    // Sidebar
+    sessions: 'セッション',
+    files: 'ファイル',
+    // Help
     helpTabs: 'タブ: + で追加（Claude/Gemini/Terminal）。ダブルクリックでタブ名変更。ドラッグで並べ替え。↺ で閉じたタブを復元。',
     helpSessions: 'セッション: 終了時に自動保存、起動時に自動復元。復元中は "Resuming..." と表示。',
     helpSidebar: 'サイドバー: セッション一覧（緑ドット=実行中）。下部にタスクリスト — 追加・チェックで完了・ダブルクリックで編集。◆ でタスクを新しいタブに送信。',
     helpTasksFromClaude: 'Claude からタスク追加: Claude の出力に [[TASK: タイトル]] を含めると自動追加。',
-    helpFileTree: 'ファイルツリー: ▤ で表示切替。アクティブタブのディレクトリに自動追従。パスをクリックでディレクトリ固定。右クリックでメニュー。',
+    helpFileTree: 'ファイルツリー: フォルダアイコンで表示切替。アクティブタブのディレクトリに自動追従。パスをクリックでディレクトリ固定。右クリックでメニュー。',
     helpTerminal: 'ターミナル: テキスト選択 + Backspace で一括削除。カラム幅はドラッグで調整可能（再起動後も保持）。',
+    // Tab bar
+    closeConfirm: '」を閉じますか？後で復元できます。',
+    close: '閉じる',
+    cancel: 'キャンセル',
+    restoreTab: '最近閉じたタブを復元',
+    addTask: 'タスクを追加...',
   },
   en: {
     openInEditor: 'Open in Editor',
@@ -22,12 +40,30 @@ export const strings = {
     setAsRoot: 'Set as Root',
     copied: '✓ Path copied',
     quitConfirm: 'Press ⌘Q again to quit',
+    // Settings labels
+    settings: 'Settings',
+    theme: 'Theme',
+    fontSize: 'Font Size',
+    language: 'Language',
+    accentColor: 'Accent Color',
+    editor: 'Editor',
+    help: 'Help',
+    // Sidebar
+    sessions: 'sessions',
+    files: 'FILES',
+    // Help
     helpTabs: 'Tabs: + to add (Claude/Gemini/Terminal). Double-click tab to rename. Drag to reorder. ↺ to restore closed tabs.',
     helpSessions: 'Sessions: Auto-saved on quit, auto-resumed on launch. "Resuming..." shown while restoring.',
     helpSidebar: 'Sidebar: Session list with status dots (green=active). Task list below — add tasks, check to complete, double-click to edit. ◆ sends task to new agent tab.',
     helpTasksFromClaude: 'Tasks from Claude: Include [[TASK: title]] in Claude output to auto-add tasks.',
-    helpFileTree: 'File Tree: Toggle with ▤. Auto-follows active tab\'s cwd. Click path to pin a directory. Right-click files for context menu.',
+    helpFileTree: 'File Tree: Toggle with folder icon. Auto-follows active tab\'s cwd. Click path to pin a directory. Right-click files for context menu.',
     helpTerminal: 'Terminal: Select text + Backspace to bulk-delete. Column widths are draggable and persisted.',
+    // Tab bar
+    closeConfirm: '" — close this tab? You can restore it later.',
+    close: 'Close',
+    cancel: 'Cancel',
+    restoreTab: 'Restore recently closed tab',
+    addTask: 'Add a task...',
   },
 } satisfies Record<Lang, Record<string, string>>
 

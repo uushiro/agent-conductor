@@ -178,7 +178,7 @@ export function FileTreeSidebar({ activeTabId, visible, width }: Props) {
     <aside className="file-tree-sidebar" style={{ width, minWidth: width }}>
       {/* ヘッダー */}
       <div className="file-tree-header">
-        <h2>Files</h2>
+        <h2>{t.files}</h2>
         <div className="file-tree-header-actions">
           <button
             className={`file-tree-toggle-hidden${showHidden ? ' active' : ''}`}
