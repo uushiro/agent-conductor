@@ -110,24 +110,27 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     tabsRef.current = tabs
   }, [tabs])
 
-  // Poll tab titles from main process + clear resuming state when agent starts
+  // Poll tab titles from main process + clear resuming state via main process isResuming flag
   useEffect(() => {
     const interval = setInterval(() => {
-      for (const tab of tabsRef.current) {
-        window.electronAPI.getTerminalTitle(tab.id).then(({ issue, detail }) => {
-          setTabs((current) =>
-            current.map((t) => {
-              if (t.id !== tab.id) return t
-              // Clear resuming state once agent has produced real output
-              const stillResuming = t.resuming && (!detail || detail === 'Resuming...')
-              const newIssue = t.customIssue ? t.issue : issue
-              const newDetail = stillResuming ? 'Resuming...' : detail
-              if (newIssue === t.issue && newDetail === t.detail && stillResuming === t.resuming) return t
-              return { ...t, issue: newIssue, detail: newDetail, resuming: stillResuming }
-            })
-          )
-        })
-      }
+      // Fetch isResuming from main process in parallel with titles
+      window.electronAPI.listTerminalInfo().then((infos) => {
+        const resumingSet = new Set(infos.filter((i) => i.isResuming).map((i) => i.id))
+        for (const tab of tabsRef.current) {
+          window.electronAPI.getTerminalTitle(tab.id).then(({ issue, detail }) => {
+            setTabs((current) =>
+              current.map((t) => {
+                if (t.id !== tab.id) return t
+                const stillResuming = resumingSet.has(t.id)
+                const newIssue = t.customIssue ? t.issue : issue
+                const newDetail = stillResuming ? 'Resuming...' : detail
+                if (newIssue === t.issue && newDetail === t.detail && stillResuming === t.resuming) return t
+                return { ...t, issue: newIssue, detail: newDetail, resuming: stillResuming }
+              })
+            )
+          })
+        }
+      })
     }, 2000)
     return () => clearInterval(interval)
   }, [])

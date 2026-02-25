@@ -791,7 +791,7 @@ html, body, #root {
   align-items: center;
   justify-content: space-between;
   height: 26px;
-  background: #1f6feb;
+  background: var(--accent);
   padding: 0 12px;
   font-size: 11px;
   color: #fff;
