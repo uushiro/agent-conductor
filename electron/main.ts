@@ -426,6 +426,24 @@ function extractClaudeAction(raw: string): string {
   return 'Thinking...'
 }
 
+// Generate a short, clean issue title from the first user prompt
+function autoTitle(input: string): string {
+  let s = input.trim()
+  // Remove common trailing patterns (Japanese verb endings + request forms)
+  s = s.replace(/[をにでがはもへと]?(して|した|する|やって|教えて|調べて|確認して|作って|作成して|まとめて|リサーチして|見せて|出して|読んで|書いて|送って|開いて|ください|お願い|頼む|欲しい|したい|してほしい|しといて|んだけど.*)$/u, '')
+  // Remove trailing particles
+  s = s.replace(/[をにでがはもへと、。]$/u, '')
+  // If result is too short, use original
+  if (s.length < 3) return input.slice(0, 25)
+  // Cap at 25 chars, break at natural boundary
+  if (s.length > 25) {
+    const cut = s.slice(0, 25)
+    const breakMatch = cut.match(/^(.+[をにでがはもへと、。の])/u)
+    s = breakMatch ? breakMatch[1].replace(/[をにでがはもへと、。]$/u, '') : cut
+  }
+  return s
+}
+
 function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
   const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGemini: false, geminiSessionFile: null as string | null, resuming: false }
   const prevProc = info.proc
@@ -850,7 +868,7 @@ function createWindow() {
         // Non-shell: capture prompt as issue/latestInput
         if (input.length > 0) {
           const truncated = input.length > 50 ? input.slice(0, 50) + '…' : input
-          if (!info.issue) info.issue = truncated
+          if (!info.issue) info.issue = autoTitle(input)
           info.latestInput = truncated
           tabInfo.set(tabId, info)
           // Record the time the user sent input (used for sidebar ordering)
