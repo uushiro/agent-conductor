@@ -288,12 +288,14 @@ export function FileTreeSidebar({ activeTabId, visible, width }: Props) {
             >
               {t.copyPath}
             </button>
-            <button
-              className="file-tree-context-item"
-              onClick={() => handleSetAsRoot(contextMenu.entry)}
-            >
-              {t.setAsRoot}
-            </button>
+            {contextMenu.entry.isDir && (
+              <button
+                className="file-tree-context-item"
+                onClick={() => handleSetAsRoot(contextMenu.entry)}
+              >
+                {t.setAsRoot}
+              </button>
+            )}
           </div>
         </>,
         document.body

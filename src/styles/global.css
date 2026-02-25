@@ -1087,6 +1087,24 @@ html, body, #root {
   text-align: center;
 }
 
+.file-tree-node-chevron {
+  font-size: 12px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  width: 14px;
+  text-align: center;
+}
+
+.file-tree-node-file-icon {
+  font-size: 9px;
+  font-weight: 700;
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-family: 'SF Mono', Menlo, monospace;
+  line-height: 1;
+}
+
 .file-tree-node-name {
   font-size: 12px;
   color: var(--text-primary);

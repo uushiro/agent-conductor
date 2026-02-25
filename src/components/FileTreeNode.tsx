@@ -1,5 +1,39 @@
 import type { FileEntry } from '../global'
 
+const FILE_ICONS: Record<string, { icon: string; color: string }> = {
+  '.ts': { icon: 'TS', color: '#3178c6' },
+  '.tsx': { icon: 'TX', color: '#3178c6' },
+  '.js': { icon: 'JS', color: '#f1e05a' },
+  '.jsx': { icon: 'JX', color: '#f1e05a' },
+  '.json': { icon: '{}', color: '#6e7681' },
+  '.md': { icon: 'M↓', color: '#519aba' },
+  '.css': { icon: '#', color: '#a855f7' },
+  '.html': { icon: '<>', color: '#e34c26' },
+  '.py': { icon: 'PY', color: '#3572a5' },
+  '.sh': { icon: '$', color: '#3fb950' },
+  '.yml': { icon: 'Y', color: '#cb171e' },
+  '.yaml': { icon: 'Y', color: '#cb171e' },
+  '.toml': { icon: 'T', color: '#9c4121' },
+  '.env': { icon: '⚙', color: '#d29922' },
+  '.gitignore': { icon: 'G', color: '#f05032' },
+  '.svg': { icon: '◇', color: '#ffb13b' },
+  '.png': { icon: '◻', color: '#a855f7' },
+  '.jpg': { icon: '◻', color: '#a855f7' },
+  '.ico': { icon: '◻', color: '#a855f7' },
+}
+
+function getFileIcon(name: string): { icon: string; color: string } {
+  // Check full filename first (e.g. .gitignore, .env)
+  if (FILE_ICONS[name]) return FILE_ICONS[name]
+  // Check extension
+  const dotIdx = name.lastIndexOf('.')
+  if (dotIdx > 0) {
+    const ext = name.slice(dotIdx)
+    if (FILE_ICONS[ext]) return FILE_ICONS[ext]
+  }
+  return { icon: '·', color: '#6e7681' }
+}
+
 interface Props {
   entry: FileEntry
   depth: number
@@ -42,7 +76,8 @@ export function FileTreeNode({
     }
   }
 
-  const icon = entry.isDir ? (isExpanded ? '▼' : '▶') : ' '
+  const chevron = entry.isDir ? (isExpanded ? '▾' : '›') : ''
+  const fileIcon = entry.isDir ? null : getFileIcon(entry.name)
 
   return (
     <>
@@ -52,7 +87,11 @@ export function FileTreeNode({
         onClick={handleClick}
         onContextMenu={(e) => onContextMenu(e, entry)}
       >
-        <span className="file-tree-node-icon">{icon}</span>
+        {entry.isDir ? (
+          <span className="file-tree-node-chevron">{chevron}</span>
+        ) : (
+          <span className="file-tree-node-file-icon" style={{ color: fileIcon!.color }}>{fileIcon!.icon}</span>
+        )}
         <span
           className={[
             'file-tree-node-name',
