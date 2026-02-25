@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { version } from '../../package.json'
 
 export function StatusBar() {
   const [cwd, setCwd] = useState('')
@@ -32,7 +33,7 @@ export function StatusBar() {
         )}
       </div>
       <div className="status-right">
-        <span className="status-item">Agent Conductor v0.1</span>
+        <span className="status-item">Agent Conductor v{version}</span>
       </div>
     </footer>
   )

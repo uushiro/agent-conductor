@@ -15,8 +15,12 @@ interface ContextMenu {
 }
 
 export function FileTreeSidebar({ activeTabId, visible }: Props) {
-  const [rootPath, setRootPath] = useState<string | null>(null)
-  const [pinned, setPinned] = useState(false)
+  const [rootPath, setRootPath] = useState<string | null>(() =>
+    localStorage.getItem('filetree-root') || null
+  )
+  const [pinned, setPinned] = useState<boolean>(() =>
+    localStorage.getItem('filetree-pinned') === 'true'
+  )
   const [inputValue, setInputValue] = useState('')
   const [editing, setEditing] = useState(false)
   const [rootEntries, setRootEntries] = useState<FileEntry[]>([])
@@ -26,7 +30,7 @@ export function FileTreeSidebar({ activeTabId, visible }: Props) {
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
   const [copyToast, setCopyToast] = useState(false)
 
-  const rootPathRef = useRef<string | null>(null)
+  const rootPathRef = useRef<string | null>(localStorage.getItem('filetree-root') || null)
   const inputRef = useRef<HTMLInputElement>(null)
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -49,6 +53,16 @@ export function FileTreeSidebar({ activeTabId, visible }: Props) {
     const id = setInterval(poll, 2000)
     return () => clearInterval(id)
   }, [activeTabId, pinned])
+
+  // rootPath / pinned を localStorage に永続化
+  useEffect(() => {
+    if (rootPath) localStorage.setItem('filetree-root', rootPath)
+    else localStorage.removeItem('filetree-root')
+  }, [rootPath])
+
+  useEffect(() => {
+    localStorage.setItem('filetree-pinned', String(pinned))
+  }, [pinned])
 
   // rootPath 変更時にツリーリロード
   useEffect(() => {
