@@ -107,11 +107,15 @@ function getRecentClaudeSessions(cwd: string): string[] {
 
 function saveSession() {
   const tabs: SavedTab[] = []
+  // Debug log for session save diagnostics
+  const debugLines: string[] = [`saveSession at ${new Date().toISOString()}`]
   for (const id of tabOrder) {
     const info = tabInfo.get(id)
     if (info) {
       const hadClaude = info.hadClaude
       let claudeSessionId: string | null = null
+
+      debugLines.push(`[${id}] issue="${info.issue}" hadClaude=${hadClaude} parentId=${info.claudeResumeParentId} sessionId=${info.claudeSessionId} cwd=${info.cwd}`)
 
       if (hadClaude) {
         if (info.claudeResumeParentId) {
@@ -130,9 +134,21 @@ function saveSession() {
             claudeSessionId = info.claudeSessionId
           }
         }
-        // If neither has conversation content, claudeSessionId stays null → next launch
-        // starts a fresh Claude session (correct behaviour for tabs with no history).
+        // Fallback: if no valid session was found, pick the most recent session
+        // with conversation content for this cwd (handles /resume inside Claude
+        // and cross-tab watcher contamination).
+        if (!claudeSessionId) {
+          const recentSessions = getRecentClaudeSessions(info.cwd || HOME)
+          for (const sid of recentSessions.slice(0, 10)) {
+            if (sessionHasConversation(sid, info.cwd || HOME)) {
+              claudeSessionId = sid
+              break
+            }
+          }
+        }
       }
+
+      debugLines.push(`  → saved claudeSessionId=${claudeSessionId}`)
 
       tabs.push({
         issue: info.issue,
@@ -146,6 +162,8 @@ function saveSession() {
   const session: SavedSession = { tabs: tabs.slice(0, 15), activeIndex: 0 }
   try {
     fs.writeFileSync(SESSION_FILE, JSON.stringify(session), 'utf-8')
+    // Write debug log next to session file
+    fs.writeFileSync(SESSION_FILE.replace('.json', '-debug.log'), debugLines.join('\n'), 'utf-8')
   } catch { /* ignore */ }
 }
 
