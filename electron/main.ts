@@ -834,18 +834,16 @@ function createWindow() {
   })
 
   // Handle git branch request
-  ipcMain.handle('git:branch', async () => {
-    const { execSync } = require('child_process')
-    try {
-      const branch = execSync('git rev-parse --abbrev-ref HEAD 2>/dev/null', {
+  ipcMain.handle('git:branch', () => {
+    return new Promise<string | null>((resolve) => {
+      execFile('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
         cwd: HOME,
         encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim()
-      return branch
-    } catch {
-      return null
-    }
+        timeout: 5000,
+      }, (err, stdout) => {
+        resolve(err ? null : stdout.trim())
+      })
+    })
   })
 
   // Handle cwd request
