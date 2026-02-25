@@ -1,6 +1,6 @@
 {
   "name": "agent-conductor",
-  "version": "2.2.14",
+  "version": "2.2.15",
   "description": "AI Agent Conductor for Claude Code",
   "main": "dist-electron/main.js",
   "scripts": {
