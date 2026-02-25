@@ -43,6 +43,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
   const restoreMenuRef = useRef<HTMLDivElement>(null)
   const agentMenuRef = useRef<HTMLDivElement>(null)
   const initialized = useRef(false)
+  const tabsRef = useRef<Tab[]>([])
 
   // Restore session or create first tab on mount
   useEffect(() => {
@@ -101,24 +102,26 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     }
   }
 
+  // Keep tabsRef in sync so polling can read current tabs without setTabs-for-reading
+  useEffect(() => {
+    tabsRef.current = tabs
+  }, [tabs])
+
   // Poll tab titles from main process
   useEffect(() => {
     const interval = setInterval(() => {
-      setTabs((prev) => {
-        for (const tab of prev) {
-          window.electronAPI.getTerminalTitle(tab.id).then(({ issue, detail }) => {
-            setTabs((current) =>
-              current.map((t) => {
-                if (t.id !== tab.id) return t
-                const newIssue = t.customIssue ? t.issue : issue
-                if (newIssue === t.issue && detail === t.detail) return t
-                return { ...t, issue: newIssue, detail }
-              })
-            )
-          })
-        }
-        return prev
-      })
+      for (const tab of tabsRef.current) {
+        window.electronAPI.getTerminalTitle(tab.id).then(({ issue, detail }) => {
+          setTabs((current) =>
+            current.map((t) => {
+              if (t.id !== tab.id) return t
+              const newIssue = t.customIssue ? t.issue : issue
+              if (newIssue === t.issue && detail === t.detail) return t
+              return { ...t, issue: newIssue, detail }
+            })
+          )
+        })
+      }
     }, 2000)
     return () => clearInterval(interval)
   }, [])
