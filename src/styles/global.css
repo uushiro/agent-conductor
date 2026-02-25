@@ -1376,6 +1376,43 @@ html, body, #root {
   font-family: 'SF Mono', Menlo, monospace;
 }
 
+/* ===================== Help section ===================== */
+.settings-divider {
+  border-top: 1px solid var(--border);
+  margin: 8px 0;
+}
+
+.settings-help-summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 4px 0;
+  user-select: none;
+}
+
+.settings-help-summary:hover {
+  color: var(--text-primary);
+}
+
+.settings-help-body {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  padding: 4px 0;
+}
+
+.settings-help-body p {
+  margin: 4px 0;
+}
+
+.settings-help-body code {
+  background: var(--bg-primary);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 10px;
+}
+
 /* ===================== Color chips ===================== */
 .settings-color-chip {
   display: inline-flex;

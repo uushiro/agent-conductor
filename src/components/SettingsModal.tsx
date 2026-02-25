@@ -223,6 +223,20 @@ export function SettingsModal({ onClose }: Props) {
               )}
             </div>
           </div>
+
+          <div className="settings-divider" />
+
+          <details className="settings-help">
+            <summary className="settings-help-summary">Help</summary>
+            <div className="settings-help-body">
+              <p><strong>Tabs</strong>: + to add (Claude/Gemini/Terminal). Double-click tab to rename. Drag to reorder. ↺ to restore closed tabs.</p>
+              <p><strong>Sessions</strong>: Auto-saved on quit, auto-resumed on launch. "Resuming..." shown while restoring.</p>
+              <p><strong>Sidebar</strong>: Session list with status dots (green=active). Task list below — add tasks, check to complete, double-click to edit. ▶ sends task to new agent tab.</p>
+              <p><strong>Tasks from Claude</strong>: Include <code>[[TASK: title]]</code> in Claude output to auto-add tasks.</p>
+              <p><strong>File Tree</strong>: Toggle with ▤. Auto-follows active tab's cwd. Click path to pin a directory. Right-click files for context menu.</p>
+              <p><strong>Terminal</strong>: Select text + Backspace to bulk-delete. Column widths are draggable and persisted.</p>
+            </div>
+          </details>
         </div>
       </div>
     </>,
