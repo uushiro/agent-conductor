@@ -214,7 +214,7 @@ export function FileTreeSidebar({ activeTabId, visible }: Props) {
             onClick={handleUnpin}
             title="Unpin (follow active tab)"
           >
-            📌
+            ⊙
           </button>
         )}
       </div>

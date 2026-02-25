@@ -91,7 +91,7 @@ export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, fileTreeVisib
             onClick={onToggleFileTree}
             title={fileTreeVisible ? 'Hide file tree' : 'Show file tree'}
           >
-            🗂
+            ▤
           </button>
         </div>
         <div className="tab-list-sidebar">
