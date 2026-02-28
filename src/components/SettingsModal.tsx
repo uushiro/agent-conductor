@@ -80,10 +80,7 @@ export function SettingsModal({ onClose }: Props) {
     ...customColors.map((v) => ({ label: v, value: v })),
   ]
 
-  const allEditors = [
-    ...PRESET_EDITORS,
-    ...customEditors.map((v) => ({ label: v, value: v })),
-  ]
+  const allEditors = [...PRESET_EDITORS]
 
   return createPortal(
     <>
@@ -200,28 +197,6 @@ export function SettingsModal({ onClose }: Props) {
                   {label}
                 </button>
               ))}
-              {addingEditor ? (
-                <input
-                  ref={addInputRef}
-                  className="settings-editor-add-input"
-                  value={addEditorValue}
-                  onChange={(e) => setAddEditorValue(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleAddEditor()
-                    if (e.key === 'Escape') { setAddingEditor(false); setAddEditorValue('') }
-                  }}
-                  onBlur={() => { setAddingEditor(false); setAddEditorValue('') }}
-                  placeholder="command..."
-                />
-              ) : (
-                <button
-                  className="settings-editor-add-btn"
-                  onClick={() => setAddingEditor(true)}
-                  title="Add custom editor"
-                >
-                  +
-                </button>
-              )}
             </div>
           </div>
 
