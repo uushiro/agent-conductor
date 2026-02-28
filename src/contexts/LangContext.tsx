@@ -26,7 +26,7 @@ export const strings = {
     helpSidebar: 'サイドバー: セッション一覧（緑ドット=実行中）。下部にタスクリスト — 追加・チェックで完了・ダブルクリックで編集。◆ でタスクを新しいタブに送信。',
     helpTasksFromClaude: 'Claude からタスク追加: Claude の出力に [[TASK: タイトル]] を含めると自動追加。',
     helpFileTree: 'ファイルツリー: フォルダアイコンで表示切替。アクティブタブのディレクトリに自動追従。パスをクリックでディレクトリ固定。右クリックでメニュー。',
-    helpTerminal: 'ターミナル: テキスト選択 + Backspace で一括削除。カラム幅はドラッグで調整可能（再起動後も保持）。',
+    helpTerminal: 'ターミナル: テキスト選択 + Backspace で一括削除。⌘+C / ⌘+V などmacOS標準キーバインドがそのまま使える。カラム幅はドラッグで調整可能（再起動後も保持）。',
     // Tab bar
     closeConfirm: '」を閉じますか？後で復元できます。',
     close: '閉じる',
@@ -59,7 +59,7 @@ export const strings = {
     helpSidebar: 'Sidebar: Session list with status dots (green=active). Task list below — add tasks, check to complete, double-click to edit. ◆ sends task to new agent tab.',
     helpTasksFromClaude: 'Tasks from Claude: Include [[TASK: title]] in Claude output to auto-add tasks.',
     helpFileTree: 'File Tree: Toggle with folder icon. Auto-follows active tab\'s cwd. Click path to pin a directory. Right-click files for context menu.',
-    helpTerminal: 'Terminal: Select text + Backspace to bulk-delete. Column widths are draggable and persisted.',
+    helpTerminal: 'Terminal: Select text + Backspace to bulk-delete. macOS standard keybindings (⌘+C / ⌘+V, etc.) work natively. Column widths are draggable and persisted.',
     // Tab bar
     closeConfirm: '" — close this tab? You can restore it later.',
     close: 'Close',
