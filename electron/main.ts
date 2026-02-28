@@ -944,9 +944,16 @@ function createWindow() {
     }
   })
 
+  const ALLOWED_EDITORS = new Set(['code', 'cursor', 'vim', 'nvim', 'subl', 'nano', 'emacs'])
+
   ipcMain.handle('fs:open-in-editor', async (_event, filePath: string, editorCommand?: string) => {
     if (editorCommand && editorCommand.trim()) {
-      execFile(editorCommand, [filePath], (err) => {
+      const cmd = editorCommand.trim()
+      if (!ALLOWED_EDITORS.has(cmd)) {
+        await shell.openPath(filePath)
+        return
+      }
+      execFile(cmd, [filePath], (err) => {
         if (err) shell.openPath(filePath)
       })
     } else {
@@ -960,7 +967,7 @@ function createWindow() {
 
   } // end ipcHandlersRegistered guard
 
-  if (VITE_DEV_SERVER_URL) {
+  if (VITE_DEV_SERVER_URL && process.env.NODE_ENV === 'development') {
     mainWindow.loadURL(VITE_DEV_SERVER_URL)
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
