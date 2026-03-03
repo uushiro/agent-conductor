@@ -98,9 +98,14 @@ Claude Code のセッション内で `/add-task` を実行すると、`[[TASK: .
 ## インストール
 
 ### DMG から
-1. `dist/Agent Conductor-x.x.x-arm64.dmg` を開く
-2. Applications フォルダにドラッグ
-3. 初回起動時: 右クリック → 開く（Gatekeeper 対応）
+1. DMG を開いて Applications フォルダにドラッグ
+2. ターミナルで以下を実行して Gatekeeper を解除：
+   ```bash
+   xattr -cr /Applications/Agent\ Conductor.app
+   ```
+3. 以降はダブルクリックで起動できる（再度 xattr は不要）
+
+> **なぜこの手順が必要？** macOS の Gatekeeper は App Store 外・未公証のアプリをブロックします。xattr コマンドで拡張属性を削除することで回避できます。一度実行すれば次回以降は不要です。
 
 ### 開発環境
 ```bash
