@@ -54,6 +54,8 @@ export interface ElectronAPI {
   listDir: (dirPath: string) => Promise<FileEntry[]>
   openInEditor: (filePath: string, editorCommand?: string) => Promise<void>
   writeClipboard: (text: string) => void
+  onUpdateAvailable: (cb: (version: string, url: string) => void) => () => void
+  openExternal: (url: string) => void
 }
 
 declare global {

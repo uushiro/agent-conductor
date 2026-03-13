@@ -91,4 +91,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openInEditor: (filePath: string, editorCommand?: string) =>
     ipcRenderer.invoke('fs:open-in-editor', filePath, editorCommand) as Promise<void>,
   writeClipboard: (text: string) => ipcRenderer.invoke('clipboard:write', text),
+
+  // Update notifications
+  onUpdateAvailable: (cb: (version: string, url: string) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, version: string, url: string) => cb(version, url)
+    ipcRenderer.on('update:available', listener)
+    return () => ipcRenderer.removeListener('update:available', listener)
+  },
+  openExternal: (url: string) => ipcRenderer.send('shell:open-url', url),
 })

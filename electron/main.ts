@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, shell, clipboard } from 'electron'
 import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs'
+import https from 'node:https'
 import { execFile } from 'node:child_process'
 
 // node-pty is a native module — require it
@@ -965,6 +966,10 @@ function createWindow() {
     clipboard.writeText(text)
   })
 
+  ipcMain.on('shell:open-url', (_event, url: string) => {
+    shell.openExternal(url)
+  })
+
   } // end ipcHandlersRegistered guard
 
   if (VITE_DEV_SERVER_URL && process.env.NODE_ENV === 'development') {
@@ -972,6 +977,9 @@ function createWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
   }
+
+  // Check for updates 3 seconds after launch (allow window to settle)
+  setTimeout(checkForUpdates, 3000)
 
   mainWindow.on('closed', () => {
     // Save session before cleanup
@@ -986,6 +994,28 @@ function createWindow() {
     ptyProcesses.clear()
     mainWindow = null
   })
+}
+
+function checkForUpdates() {
+  const currentVersion = app.getVersion()
+  const options = {
+    hostname: 'api.github.com',
+    path: '/repos/uushiro/agent-conductor/releases/latest',
+    headers: { 'User-Agent': 'agent-conductor' },
+  }
+  https.get(options, (res) => {
+    let data = ''
+    res.on('data', (chunk) => { data += chunk })
+    res.on('end', () => {
+      try {
+        const release = JSON.parse(data)
+        const latestVersion = (release.tag_name as string)?.replace(/^v/, '')
+        if (latestVersion && latestVersion !== currentVersion) {
+          mainWindow?.webContents.send('update:available', latestVersion, release.html_url as string)
+        }
+      } catch { /* ignore parse errors */ }
+    })
+  }).on('error', () => { /* ignore network errors */ })
 }
 
 app.whenReady().then(createWindow)

@@ -1371,6 +1371,23 @@ html, body, #root {
   opacity: 1;
 }
 
+/* Update available button */
+.status-update-btn {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  color: rgba(255, 255, 255, 0.9);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.9;
+  transition: opacity 0.15s;
+}
+
+.status-update-btn:hover {
+  opacity: 1;
+}
+
 /* Editor chips */
 .settings-row-editor {
   align-items: flex-start;
