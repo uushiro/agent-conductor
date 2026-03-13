@@ -21,7 +21,7 @@ export const strings = {
     sessions: 'セッション',
     files: 'ファイル',
     // Help
-    helpTabs: 'タブ: + で追加（Claude/Gemini/Terminal）。ダブルクリックでタブ名変更。ドラッグで並べ替え。↺ で閉じたタブを復元。',
+    helpTabs: 'タブ: + で追加（Claude/Gemini/Terminal）。ダブルクリックでタブ名変更。ドラッグで並べ替え。↺ で閉じたタブを復元。\nショートカット: Ctrl+Tab / Ctrl+Shift+Tab で前後タブ移動。⌘+1〜8 で番号指定、⌘+9 で最後のタブへ。',
     helpSessions: 'セッション: 終了時に自動保存、起動時に自動復元。復元中は "Resuming..." と表示。',
     helpSidebar: 'サイドバー: セッション一覧（緑ドット=実行中）。下部にタスクリスト — 追加・チェックで完了・ダブルクリックで編集。◆ でタスクを新しいタブに送信。',
     helpTasksFromClaude: 'Claude からタスク追加: Claude の出力に [[TASK: タイトル]] を含めると自動追加。',
@@ -54,7 +54,7 @@ export const strings = {
     sessions: 'sessions',
     files: 'FILES',
     // Help
-    helpTabs: 'Tabs: + to add (Claude/Gemini/Terminal). Double-click tab to rename. Drag to reorder. ↺ to restore closed tabs.',
+    helpTabs: 'Tabs: + to add (Claude/Gemini/Terminal). Double-click tab to rename. Drag to reorder. ↺ to restore closed tabs.\nShortcuts: Ctrl+Tab / Ctrl+Shift+Tab to cycle tabs. ⌘+1–8 for tab by index, ⌘+9 for last tab.',
     helpSessions: 'Sessions: Auto-saved on quit, auto-resumed on launch. "Resuming..." shown while restoring.',
     helpSidebar: 'Sidebar: Session list with status dots (green=active). Task list below — add tasks, check to complete, double-click to edit. ◆ sends task to new agent tab.',
     helpTasksFromClaude: 'Tasks from Claude: Include [[TASK: title]] in Claude output to auto-add tasks.',

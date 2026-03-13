@@ -356,12 +356,29 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     setEditingTabId(null)
   }
 
-  // Keyboard shortcuts: Cmd+1-9 switch tab, Cmd+Option+Left/Right navigate tabs
+  // Keyboard shortcuts: Cmd+1-9 switch tab, Cmd+Option+Left/Right navigate tabs, Ctrl+Tab cycle tabs
   useEffect(() => {
+    const navigateTab = (direction: 'prev' | 'next') => {
+      const currentIdx = tabsRef.current.findIndex((t) => t.id === activeTabId)
+      if (currentIdx === -1) return
+      const nextIdx = direction === 'prev'
+        ? (currentIdx - 1 + tabsRef.current.length) % tabsRef.current.length
+        : (currentIdx + 1) % tabsRef.current.length
+      onActiveTabChange(tabsRef.current[nextIdx].id)
+    }
+
     const handler = (e: KeyboardEvent) => {
+      // Ctrl+Tab: next tab / Ctrl+Shift+Tab: previous tab
+      if (e.ctrlKey && e.key === 'Tab') {
+        e.preventDefault()
+        navigateTab(e.shiftKey ? 'prev' : 'next')
+        return
+      }
+
       if (!e.metaKey) return
-      // Cmd+1~9: switch to tab by index
-      if (e.key >= '1' && e.key <= '9') {
+
+      // Cmd+1~8: switch to tab by index
+      if (e.key >= '1' && e.key <= '8') {
         const idx = parseInt(e.key) - 1
         const target = tabsRef.current[idx]
         if (target) {
@@ -370,15 +387,19 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         }
         return
       }
+      // Cmd+9: switch to last tab
+      if (e.key === '9') {
+        const last = tabsRef.current[tabsRef.current.length - 1]
+        if (last) {
+          e.preventDefault()
+          onActiveTabChange(last.id)
+        }
+        return
+      }
       // Cmd+Option+Left/Right: previous/next tab
       if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
         e.preventDefault()
-        const currentIdx = tabsRef.current.findIndex((t) => t.id === activeTabId)
-        if (currentIdx === -1) return
-        const nextIdx = e.key === 'ArrowLeft'
-          ? (currentIdx - 1 + tabsRef.current.length) % tabsRef.current.length
-          : (currentIdx + 1) % tabsRef.current.length
-        onActiveTabChange(tabsRef.current[nextIdx].id)
+        navigateTab(e.key === 'ArrowLeft' ? 'prev' : 'next')
       }
     }
     document.addEventListener('keydown', handler)
