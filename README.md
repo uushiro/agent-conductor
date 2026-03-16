@@ -108,9 +108,9 @@ Claude Code のセッション内で `/add-task` を実行すると、`[[TASK: .
    ```bash
    xattr -cr /Applications/Agent\ Conductor.app
    ```
-3. 以降はダブルクリックで起動できる（再度 xattr は不要）
+3. 以降はダブルクリックで起動できる
 
-> **なぜこの手順が必要？** macOS の Gatekeeper は App Store 外・未公証のアプリをブロックします。xattr コマンドで拡張属性を削除することで回避できます。一度実行すれば次回以降は不要です。
+> **なぜこの手順が必要？** macOS の Gatekeeper は App Store 外・未公証のアプリをブロックします。xattr コマンドで拡張属性を削除することで回避できます。**アップデートのたびに必要です**（新しい DMG をインストールするたびに実行してください）。
 
 ### 開発環境
 ```bash
