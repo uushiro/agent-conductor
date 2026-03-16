@@ -8,7 +8,7 @@ export interface ClosedTabEntry {
   issue: string
   cwd: string
   claudeSessionId: string | null
-  agent: 'claude' | 'gemini'
+  agent: 'claude' | 'gemini' | 'codex'
   closedAt: number
 }
 
@@ -27,7 +27,7 @@ export interface TabInfo {
 }
 
 export interface SavedSession {
-  tabs: Array<{ issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null; hadGemini: boolean }>
+  tabs: Array<{ issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null; hadGemini: boolean; hadCodex: boolean }>
   activeIndex: number
 }
 
@@ -56,6 +56,8 @@ export interface ElectronAPI {
   writeClipboard: (text: string) => void
   onUpdateAvailable: (cb: (version: string, url: string) => void) => () => void
   openExternal: (url: string) => void
+  loadAppSettings: () => Promise<Record<string, unknown> | null>
+  saveAppSettings: (data: string) => void
 }
 
 declare global {

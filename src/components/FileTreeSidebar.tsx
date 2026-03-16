@@ -19,14 +19,10 @@ interface ContextMenu {
 
 export function FileTreeSidebar({ activeTabId, visible, width }: Props) {
   const { lang } = useLang()
-  const { editorCommand } = useSettings()
+  const { editorCommand, fileTreeRoot, fileTreePinned, updateSettings } = useSettings()
   const t = strings[lang]
-  const [rootPath, setRootPath] = useState<string | null>(() =>
-    localStorage.getItem('filetree-root') || null
-  )
-  const [pinned, setPinned] = useState<boolean>(() =>
-    localStorage.getItem('filetree-pinned') === 'true'
-  )
+  const [rootPath, setRootPath] = useState<string | null>(fileTreeRoot)
+  const [pinned, setPinned] = useState<boolean>(fileTreePinned)
   const [inputValue, setInputValue] = useState('')
   const [editing, setEditing] = useState(false)
   const [rootEntries, setRootEntries] = useState<FileEntry[]>([])
@@ -36,7 +32,7 @@ export function FileTreeSidebar({ activeTabId, visible, width }: Props) {
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
   const [copyToast, setCopyToast] = useState(false)
 
-  const rootPathRef = useRef<string | null>(localStorage.getItem('filetree-root') || null)
+  const rootPathRef = useRef<string | null>(fileTreeRoot)
   const inputRef = useRef<HTMLInputElement>(null)
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -60,15 +56,28 @@ export function FileTreeSidebar({ activeTabId, visible, width }: Props) {
     return () => clearInterval(id)
   }, [activeTabId, pinned])
 
-  // rootPath / pinned を localStorage に永続化
+  // Settings ロード完了後に rootPath / pinned を同期（非同期ロード対応）
+  const settingsLoadedRef = useRef(false)
   useEffect(() => {
-    if (rootPath) localStorage.setItem('filetree-root', rootPath)
-    else localStorage.removeItem('filetree-root')
-  }, [rootPath])
+    if (settingsLoadedRef.current) return
+    if (fileTreeRoot !== null || fileTreePinned) {
+      settingsLoadedRef.current = true
+      setRootPath(fileTreeRoot)
+      rootPathRef.current = fileTreeRoot
+      setPinned(fileTreePinned)
+    }
+  }, [fileTreeRoot, fileTreePinned])
+
+  // rootPath / pinned を Settings に永続化（ロード完了後のみ）
+  useEffect(() => {
+    if (!settingsLoadedRef.current) return
+    updateSettings({ fileTreeRoot: rootPath })
+  }, [rootPath]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    localStorage.setItem('filetree-pinned', String(pinned))
-  }, [pinned])
+    if (!settingsLoadedRef.current) return
+    updateSettings({ fileTreePinned: pinned })
+  }, [pinned]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // rootPath 変更時にツリーリロード
   useEffect(() => {

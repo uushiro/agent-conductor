@@ -4,7 +4,7 @@ import { useSettings } from '../contexts/SettingsContext'
 import { useLang, strings } from '../contexts/LangContext'
 
 export interface TerminalTabsHandle {
-  sendToNewTab: (prompt: string, agent: 'claude' | 'gemini') => void
+  sendToNewTab: (prompt: string, agent: 'claude' | 'gemini' | 'codex') => void
 }
 
 interface Tab {
@@ -19,7 +19,7 @@ interface ClosedEntry {
   issue: string
   cwd: string
   claudeSessionId: string | null
-  agent: 'claude' | 'gemini'
+  agent: 'claude' | 'gemini' | 'codex'
   closedAt: number
 }
 
@@ -29,7 +29,7 @@ interface Props {
 }
 
 export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function TerminalTabs({ activeTabId, onActiveTabChange }, ref) {
-  const { fontSize } = useSettings()
+  const { fontSize, defaultAgent } = useSettings()
   const { lang } = useLang()
   const t = strings[lang]
   const [tabs, setTabs] = useState<Tab[]>([])
@@ -62,6 +62,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       const restored: Tab[] = []
       const claudeResumes: Array<{ tabId: string; sessionId: string | null }> = []
       const geminiResumes: Array<{ tabId: string }> = []
+      const codexResumes: Array<{ tabId: string }> = []
       for (const saved of session.tabs) {
         const tabId = await window.electronAPI.createTerminal(
           saved.cwd,
@@ -74,8 +75,10 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
           claudeResumes.push({ tabId, sessionId: saved.claudeSessionId })
         } else if (saved.hadGemini) {
           geminiResumes.push({ tabId })
+        } else if (saved.hadCodex) {
+          codexResumes.push({ tabId })
         }
-        const willResume = saved.hadClaude || saved.hadGemini
+        const willResume = saved.hadClaude || saved.hadGemini || saved.hadCodex
         restored.push({
           id: tabId,
           issue: saved.issue,
@@ -102,6 +105,14 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         setTimeout(() => {
           window.electronAPI.sendTerminalInput(tabId, 'gemini --resume latest\r')
         }, claudeOffset + i * 2000)
+      })
+
+      // Auto-resume Codex tabs (after all Gemini resumes)
+      const geminiOffset = claudeOffset + geminiResumes.length * 2000
+      codexResumes.forEach(({ tabId }, i) => {
+        setTimeout(() => {
+          window.electronAPI.sendTerminalInput(tabId, 'codex\r')
+        }, geminiOffset + i * 2000)
       })
     } else {
       createTab()
@@ -180,24 +191,32 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     return () => document.removeEventListener('mousedown', handler)
   }, [showAgentMenu])
 
-  // ref to always-current doCloseTab (used in keydown handler below)
+  // ref to always-current doCloseTab / closeTab (used in keydown handler below)
   const doCloseTabRef = useRef<(tabId: string) => void>(() => {})
+  const closeTabRef = useRef<(tabId: string) => void>(() => {})
+  const confirmCloseRef = useRef<{ tabId: string; issue: string } | null>(null)
+  confirmCloseRef.current = confirmClose
 
   // Escape cancels / Enter confirms the close dialog
   useEffect(() => {
     if (!confirmClose) return
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setConfirmClose(null)
-      if (e.key === 'Enter') {
+      if (e.key === 'Escape') {
+        e.stopImmediatePropagation()
+        setConfirmClose(null)
+      }
+      if (e.key === 'Enter' || (e.metaKey && e.key === 'w')) {
+        e.preventDefault()
+        e.stopImmediatePropagation()
         doCloseTabRef.current(confirmClose.tabId)
         setConfirmClose(null)
       }
     }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
+    document.addEventListener('keydown', handler, true) // capture phase: fires before main handler
+    return () => document.removeEventListener('keydown', handler, true)
   }, [confirmClose])
 
-  const createTab = useCallback(async (agent: 'claude' | 'gemini' | 'terminal' = 'claude', initialPrompt?: string) => {
+  const createTab = useCallback(async (agent: 'claude' | 'gemini' | 'codex' | 'terminal' = defaultAgent, initialPrompt?: string) => {
     const tabId = await window.electronAPI.createTerminal()
     setTabs((prev) => [
       ...prev,
@@ -206,7 +225,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     onActiveTabChange(tabId)
     if (agent !== 'terminal') {
       setTimeout(() => {
-        const cmd = agent === 'gemini' ? 'gemini\r' : 'claude\r'
+        const cmd = agent === 'gemini' ? 'gemini\r' : agent === 'codex' ? 'codex\r' : 'claude\r'
         window.electronAPI.sendTerminalInput(tabId, cmd)
         if (initialPrompt) {
           // Wait for agent to initialize before sending the prompt
@@ -216,10 +235,10 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         }
       }, 1000)
     }
-  }, [onActiveTabChange])
+  }, [onActiveTabChange, defaultAgent])
 
   useImperativeHandle(ref, () => ({
-    sendToNewTab: (prompt: string, agent: 'claude' | 'gemini') => {
+    sendToNewTab: (prompt: string, agent: 'claude' | 'gemini' | 'codex') => {
       createTab(agent, prompt)
     },
   }), [createTab])
@@ -227,6 +246,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
   // Actual close logic (no confirmation)
   const doCloseTab = useCallback(
     (tabId: string) => {
+      setConfirmClose(null)
       setTabs((prev) => {
         if (prev.length <= 1) return prev
         const idx = prev.findIndex((t) => t.id === tabId)
@@ -243,19 +263,15 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
   )
   doCloseTabRef.current = doCloseTab
 
-  // Close with confirmation if Claude session exists
+  // Close with confirmation always
   const closeTab = useCallback(
-    async (tabId: string) => {
-      const hasClaude = await window.electronAPI.getTabHasClaude(tabId)
-      if (hasClaude) {
-        const tab = tabs.find((t) => t.id === tabId)
-        setConfirmClose({ tabId, issue: tab?.issue || tab?.detail || 'このタブ' })
-        return
-      }
-      doCloseTab(tabId)
+    (tabId: string) => {
+      const tab = tabs.find((t) => t.id === tabId)
+      setConfirmClose({ tabId, issue: tab?.issue || tab?.detail || 'このタブ' })
     },
-    [tabs, doCloseTab]
+    [tabs]
   )
+  closeTabRef.current = closeTab
 
   // Restore a closed tab
   const restoreTab = useCallback(
@@ -279,6 +295,8 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       setTimeout(() => {
         const cmd = entry.agent === 'gemini'
           ? 'gemini --resume latest\r'
+          : entry.agent === 'codex'
+          ? 'codex\r'
           : entry.claudeSessionId ? `claude --resume ${entry.claudeSessionId}\r` : 'claude\r'
         window.electronAPI.sendTerminalInput(tabId, cmd)
       }, 1000)
@@ -400,11 +418,23 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
         e.preventDefault()
         navigateTab(e.key === 'ArrowLeft' ? 'prev' : 'next')
+        return
+      }
+      // Cmd+T: new tab
+      if (e.key === 't') {
+        e.preventDefault()
+        createTab()
+        return
+      }
+      // Cmd+W: close active tab (with confirmation)
+      if (e.key === 'w') {
+        e.preventDefault()
+        if (activeTabId) closeTabRef.current(activeTabId)
       }
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [activeTabId, onActiveTabChange])
+  }, [activeTabId, onActiveTabChange, createTab])
 
   if (tabs.length === 0) {
     return null
@@ -462,22 +492,28 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
             <button className="tab-new" onClick={() => setShowAgentMenu((v) => !v)}>
               +
             </button>
-            {showAgentMenu && (
+            {showAgentMenu && (() => {
+              const agentItems: Array<{ agent: 'claude' | 'gemini' | 'codex'; icon: string; label: string }> = [
+                { agent: 'claude', icon: '◆', label: 'Claude' },
+                { agent: 'gemini', icon: '◇', label: 'Gemini' },
+                { agent: 'codex', icon: '⬡', label: 'Codex' },
+              ]
+              const sorted = [
+                ...agentItems.filter((a) => a.agent === defaultAgent),
+                ...agentItems.filter((a) => a.agent !== defaultAgent),
+              ]
+              return (
               <div className="tab-agent-menu">
-                <button
-                  className="tab-agent-item tab-agent-default"
-                  onClick={() => { createTab('claude'); setShowAgentMenu(false) }}
-                >
-                  <span className="agent-icon">◆</span>
-                  Claude
-                </button>
-                <button
-                  className="tab-agent-item"
-                  onClick={() => { createTab('gemini'); setShowAgentMenu(false) }}
-                >
-                  <span className="agent-icon">◇</span>
-                  Gemini
-                </button>
+                {sorted.map(({ agent, icon, label }) => (
+                  <button
+                    key={agent}
+                    className={`tab-agent-item${agent === defaultAgent ? ' tab-agent-default' : ''}`}
+                    onClick={() => { createTab(agent); setShowAgentMenu(false) }}
+                  >
+                    <span className="agent-icon">{icon}</span>
+                    {label}
+                  </button>
+                ))}
                 <button
                   className="tab-agent-item"
                   onClick={() => { createTab('terminal'); setShowAgentMenu(false) }}
@@ -486,7 +522,8 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
                   Terminal
                 </button>
               </div>
-            )}
+              )
+            })()}
           </div>
           <div className="tab-restore-wrapper" ref={restoreMenuRef}>
             <button

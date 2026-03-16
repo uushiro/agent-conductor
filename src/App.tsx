@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useLang, strings } from './contexts/LangContext'
+import { useSettings } from './contexts/SettingsContext'
+import { SplashScreen } from './components/SplashScreen'
 import { Sidebar } from './components/Sidebar'
 import { FileTreeSidebar } from './components/FileTreeSidebar'
 import { TerminalTabs, type TerminalTabsHandle } from './components/TerminalTabs'
@@ -7,9 +9,9 @@ import { StatusBar } from './components/StatusBar'
 
 export function App() {
   const { lang } = useLang()
+  const { fileTreeVisible, updateSettings, loaded } = useSettings()
   const [activeTabId, setActiveTabId] = useState<string>('')
   const [showQuitConfirm, setShowQuitConfirm] = useState(false)
-  const [fileTreeVisible, setFileTreeVisible] = useState(true)
   const tabsRef = useRef<TerminalTabsHandle>(null)
 
   const [sidebarWidth, setSidebarWidth] = useState(() =>
@@ -71,6 +73,16 @@ export function App() {
     window.addEventListener('mouseup', onUp)
   }, [])
 
+  // Remove the HTML splash once React+settings are ready
+  useEffect(() => {
+    if (!loaded) return
+    const el = document.getElementById('splash')
+    if (!el) return
+    el.style.transition = 'opacity 0.3s ease'
+    el.style.opacity = '0'
+    setTimeout(() => el.remove(), 300)
+  }, [loaded])
+
   return (
     <div className="app">
       {showQuitConfirm && (
@@ -84,7 +96,7 @@ export function App() {
           onTabSelect={setActiveTabId}
           onSendToAgent={(prompt, agent) => tabsRef.current?.sendToNewTab(prompt, agent)}
           fileTreeVisible={fileTreeVisible}
-          onToggleFileTree={() => setFileTreeVisible((v) => !v)}
+          onToggleFileTree={() => updateSettings({ fileTreeVisible: !fileTreeVisible })}
           width={sidebarWidth}
         />
         <div className="resize-handle" onMouseDown={handleSidebarResize} />

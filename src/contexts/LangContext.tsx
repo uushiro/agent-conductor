@@ -16,6 +16,7 @@ export const strings = {
     language: '言語',
     accentColor: 'アクセントカラー',
     editor: 'エディタ',
+    defaultAgent: 'デフォルトエージェント',
     help: 'ヘルプ',
     // Sidebar
     sessions: 'セッション',
@@ -49,6 +50,7 @@ export const strings = {
     language: 'Language',
     accentColor: 'Accent Color',
     editor: 'Editor',
+    defaultAgent: 'Default Agent',
     help: 'Help',
     // Sidebar
     sessions: 'sessions',

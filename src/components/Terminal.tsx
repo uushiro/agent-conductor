@@ -58,8 +58,30 @@ export function Terminal({ tabId, isActive, fontSize }: TerminalProps) {
     fitAddonRef.current = fitAddon
 
     // Delete selected text in bulk (selection + Backspace/Delete)
+    // Also pass through tab-switching shortcuts so they bubble to document handlers
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== 'keydown') return true
+
+      // Pass through tab-switching shortcuts (xterm would otherwise swallow them)
+      const isTabSwitch =
+        (ev.ctrlKey && ev.key === 'Tab') || // Ctrl+Tab / Ctrl+Shift+Tab
+        (ev.metaKey && ev.key >= '1' && ev.key <= '9') || // Cmd+1-9
+        (ev.metaKey && ev.altKey && (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight')) || // Cmd+Option+←/→
+        (ev.metaKey && ev.key === 'w') || // Cmd+W
+        (ev.metaKey && ev.key === 't') // Cmd+T
+      if (isTabSwitch) {
+        document.dispatchEvent(new KeyboardEvent('keydown', {
+          key: ev.key,
+          code: ev.code,
+          metaKey: ev.metaKey,
+          ctrlKey: ev.ctrlKey,
+          shiftKey: ev.shiftKey,
+          altKey: ev.altKey,
+          bubbles: true,
+        }))
+        return false
+      }
+
       if ((ev.key === 'Backspace' || ev.key === 'Delete') && term.hasSelection()) {
         const selected = term.getSelection()
         // Strip newlines (wrapped lines) and count characters

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { useSettings } from '../contexts/SettingsContext'
+import { useSettings, DefaultAgent } from '../contexts/SettingsContext'
 import { useLang, strings } from '../contexts/LangContext'
 
 interface Props {
@@ -27,7 +27,7 @@ const PRESET_EDITORS = [
 ]
 
 export function SettingsModal({ onClose }: Props) {
-  const { theme, fontSize, editorCommand, customEditors, accentColor, customColors, updateSettings } = useSettings()
+  const { theme, fontSize, editorCommand, customEditors, accentColor, customColors, defaultAgent, updateSettings } = useSettings()
   const { lang, toggleLang } = useLang()
   const t = strings[lang]
   const [addingEditor, setAddingEditor] = useState(false)
@@ -182,6 +182,21 @@ export function SettingsModal({ onClose }: Props) {
                   +
                 </button>
               )}
+            </div>
+          </div>
+
+          <div className="settings-row">
+            <label className="settings-label">{t.defaultAgent}</label>
+            <div className="settings-toggle-group">
+              {(['claude', 'gemini', 'codex'] as DefaultAgent[]).map((agent) => (
+                <button
+                  key={agent}
+                  className={`settings-toggle-btn${defaultAgent === agent ? ' active' : ''}`}
+                  onClick={() => updateSettings({ defaultAgent: agent })}
+                >
+                  {agent.charAt(0).toUpperCase() + agent.slice(1)}
+                </button>
+              ))}
             </div>
           </div>
 

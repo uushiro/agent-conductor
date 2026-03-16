@@ -99,4 +99,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('update:available', listener)
   },
   openExternal: (url: string) => ipcRenderer.send('shell:open-url', url),
+
+  // Settings persistence (file-based, more reliable than localStorage in Electron)
+  loadAppSettings: () => ipcRenderer.invoke('settings:load') as Promise<Record<string, unknown> | null>,
+  saveAppSettings: (data: string) => ipcRenderer.send('settings:save', data),
 })

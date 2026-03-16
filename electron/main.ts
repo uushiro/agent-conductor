@@ -21,7 +21,7 @@ const tabTimers = new Map<string, ReturnType<typeof setInterval>>()
 const tabInfo = new Map<string, {
   cwd: string; proc: string; issue: string; latestInput: string
   claudeSessionId: string | null; claudeResumeParentId: string | null; hadClaude: boolean
-  hadGemini: boolean; geminiSessionFile: string | null; resuming: boolean
+  hadGemini: boolean; geminiSessionFile: string | null; hadCodex: boolean; resuming: boolean
 }>()
 
 interface ClosedTabEntry {
@@ -80,6 +80,7 @@ interface SavedTab {
   hadClaude: boolean
   claudeSessionId: string | null
   hadGemini: boolean
+  hadCodex: boolean
 }
 
 interface SavedSession {
@@ -87,7 +88,9 @@ interface SavedSession {
   activeIndex: number
 }
 
-const SESSION_FILE = path.join(app.getPath('userData'), 'session.json')
+const IS_DEV = process.env.NODE_ENV === 'development' || !!process.env.VITE_DEV_SERVER_URL
+const SESSION_FILE = path.join(app.getPath('userData'), IS_DEV ? 'session-dev.json' : 'session.json')
+const SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json')
 
 // Get recent Claude session IDs for a cwd, sorted by most recent first
 function getRecentClaudeSessions(cwd: string): string[] {
@@ -151,6 +154,7 @@ function saveSession() {
         hadClaude,
         claudeSessionId,
         hadGemini: info.hadGemini,
+        hadCodex: info.hadCodex,
       })
     }
   }
@@ -446,7 +450,7 @@ function autoTitle(input: string): string {
 }
 
 function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
-  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGemini: false, geminiSessionFile: null as string | null, resuming: false }
+  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGemini: false, geminiSessionFile: null as string | null, hadCodex: false, resuming: false }
   const prevProc = info.proc
 
   try {
@@ -461,6 +465,7 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
       // Shell → agent: mark appropriate flag (session watch started at input time)
       if (info.proc === 'claude') info.hadClaude = true
       if (info.proc === 'gemini') info.hadGemini = true
+      if (info.proc === 'codex') info.hadCodex = true
       info.resuming = false
     } else if (prevProc !== '' && !SHELLS.has(prevProc) && SHELLS.has(info.proc)) {
       // Agent → shell: clear agent state
@@ -472,6 +477,9 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
       if (prevProc === 'gemini') {
         info.hadGemini = false
         info.geminiSessionFile = null
+      }
+      if (prevProc === 'codex') {
+        info.hadCodex = false
       }
       info.latestInput = ''
       tabInputBuf.delete(id)
@@ -504,7 +512,7 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
   })
 
   ptyProcesses.set(id, ptyProcess)
-  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null, resuming: false })
+  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null, hadCodex: false, resuming: false })
   tabOrder.push(id)
 
   // Relay pty output → renderer, and buffer last output for sidebar
@@ -592,7 +600,7 @@ function createWindow() {
     title: 'Agent Conductor',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 15, y: 15 },
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#0d1117',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -667,7 +675,8 @@ function createWindow() {
         const active = (now - lastOutputAt) < 3000
         const isClaudeRunning = !!info?.hadClaude && !!info?.proc && !SHELLS.has(info.proc)
         const isGeminiRunning = !!info?.hadGemini && !!info?.proc && !SHELLS.has(info.proc)
-        const isAgentRunning = isClaudeRunning || isGeminiRunning
+        const isCodexRunning = !!info?.hadCodex && !!info?.proc && !SHELLS.has(info.proc)
+        const isAgentRunning = isClaudeRunning || isGeminiRunning || isCodexRunning
         const isThinking = isAgentRunning && active
 
         let lastOutput: string
@@ -765,6 +774,12 @@ function createWindow() {
         })
         if (closedTabsHistory.length > 10) closedTabsHistory.pop()
       }
+    } else if (closingInfo?.hadCodex) {
+      closedTabsHistory.unshift({
+        issue: closingInfo.issue, cwd: closingInfo.cwd || HOME,
+        claudeSessionId: null, agent: 'codex', closedAt: Date.now(),
+      })
+      if (closedTabsHistory.length > 10) closedTabsHistory.pop()
     }
 
     const timer = tabTimers.get(tabId)
@@ -797,7 +812,7 @@ function createWindow() {
   // Whether a tab has an active claude session (used for close confirmation)
   ipcMain.handle('terminal:get-tab-has-claude', (_event, tabId: string) => {
     const info = tabInfo.get(tabId)
-    return !!(info?.hadClaude || info?.hadGemini)
+    return !!(info?.hadClaude || info?.hadGemini || info?.hadCodex)
   })
 
   // Get recently closed tab history (for restore menu)
@@ -839,6 +854,12 @@ function createWindow() {
           if (/--resume/.test(input)) {
             tabTaskCooldown.set(tabId, Date.now() + TASK_RESUME_COOLDOWN_MS)
           }
+        }
+
+        // Detect "codex" command being launched from shell
+        if (/^codex(\s|$)/.test(input)) {
+          info.hadCodex = true
+          tabInfo.set(tabId, info)
         }
 
         // Detect "claude" command being launched from shell → snapshot NOW before file is created
@@ -964,6 +985,19 @@ function createWindow() {
 
   ipcMain.handle('clipboard:write', (_event, text: string) => {
     clipboard.writeText(text)
+  })
+
+  ipcMain.handle('settings:load', () => {
+    try {
+      if (fs.existsSync(SETTINGS_FILE)) {
+        return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'))
+      }
+    } catch {}
+    return null
+  })
+
+  ipcMain.on('settings:save', (_event, data: string) => {
+    try { fs.writeFileSync(SETTINGS_FILE, data) } catch {}
   })
 
   ipcMain.on('shell:open-url', (_event, url: string) => {
