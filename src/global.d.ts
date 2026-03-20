@@ -58,6 +58,10 @@ export interface ElectronAPI {
   openExternal: (url: string) => void
   loadAppSettings: () => Promise<Record<string, unknown> | null>
   saveAppSettings: (data: string) => void
+  openFileDialog: () => Promise<string[]>
+  writeClipboardImage: (filePath: string) => Promise<boolean>
+  saveClipboardImage: (filePath: string) => Promise<boolean>
+  pasteToWindow: () => Promise<void>
 }
 
 declare global {

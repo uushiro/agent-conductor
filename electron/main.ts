@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, clipboard } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, clipboard, dialog, nativeImage } from 'electron'
 import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs'
@@ -985,6 +985,35 @@ function createWindow() {
 
   ipcMain.handle('clipboard:write', (_event, text: string) => {
     clipboard.writeText(text)
+  })
+
+  ipcMain.handle('clipboard:write-image', (_event, filePath: string) => {
+    const img = nativeImage.createFromPath(filePath)
+    if (!img.isEmpty()) {
+      clipboard.writeImage(img)
+      return true
+    }
+    return false
+  })
+
+  ipcMain.handle('clipboard:save-image', (_event, filePath: string) => {
+    const img = clipboard.readImage()
+    if (img.isEmpty()) return false
+    const png = img.toPNG()
+    require('fs').writeFileSync(filePath, png)
+    return true
+  })
+
+  ipcMain.handle('window:paste', () => {
+    mainWindow?.webContents.paste()
+  })
+
+  ipcMain.handle('dialog:open-file', async () => {
+    if (!mainWindow) return []
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile', 'multiSelections'],
+    })
+    return result.canceled ? [] : result.filePaths
   })
 
   ipcMain.handle('settings:load', () => {

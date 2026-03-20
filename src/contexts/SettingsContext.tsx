@@ -4,6 +4,10 @@ export type Theme = 'dark' | 'light'
 
 export type DefaultAgent = 'claude' | 'gemini' | 'codex'
 
+export type InputSendMode = 'enter' | 'button' | 'cmd-enter'
+
+export type InputSubmitMode = 'direct' | 'paste'
+
 interface Settings {
   theme: Theme
   fontSize: number
@@ -15,6 +19,8 @@ interface Settings {
   fileTreeVisible: boolean
   fileTreeRoot: string | null
   fileTreePinned: boolean
+  inputSendMode: InputSendMode
+  inputSubmitMode: InputSubmitMode
 }
 
 interface SettingsContextValue extends Settings {
@@ -33,6 +39,8 @@ const DEFAULTS: Settings = {
   fileTreeVisible: true,
   fileTreeRoot: null,
   fileTreePinned: false,
+  inputSendMode: 'enter',
+  inputSubmitMode: 'direct',
 }
 
 const SettingsContext = createContext<SettingsContextValue>({

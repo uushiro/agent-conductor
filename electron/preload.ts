@@ -103,4 +103,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Settings persistence (file-based, more reliable than localStorage in Electron)
   loadAppSettings: () => ipcRenderer.invoke('settings:load') as Promise<Record<string, unknown> | null>,
   saveAppSettings: (data: string) => ipcRenderer.send('settings:save', data),
+  openFileDialog: () => ipcRenderer.invoke('dialog:open-file') as Promise<string[]>,
+  writeClipboardImage: (filePath: string) => ipcRenderer.invoke('clipboard:write-image', filePath) as Promise<boolean>,
+  saveClipboardImage: (filePath: string) => ipcRenderer.invoke('clipboard:save-image', filePath) as Promise<boolean>,
+  pasteToWindow: () => ipcRenderer.invoke('window:paste'),
 })

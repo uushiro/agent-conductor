@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { useSettings, DefaultAgent } from '../contexts/SettingsContext'
+import { useSettings, DefaultAgent, InputSendMode, InputSubmitMode } from '../contexts/SettingsContext'
 import { useLang, strings } from '../contexts/LangContext'
 
 interface Props {
@@ -27,7 +27,7 @@ const PRESET_EDITORS = [
 ]
 
 export function SettingsModal({ onClose }: Props) {
-  const { theme, fontSize, editorCommand, customEditors, accentColor, customColors, defaultAgent, updateSettings } = useSettings()
+  const { theme, fontSize, editorCommand, customEditors, accentColor, customColors, defaultAgent, inputSendMode, inputSubmitMode, updateSettings } = useSettings()
   const { lang, toggleLang } = useLang()
   const t = strings[lang]
   const [addingEditor, setAddingEditor] = useState(false)
@@ -195,6 +195,43 @@ export function SettingsModal({ onClose }: Props) {
                   onClick={() => updateSettings({ defaultAgent: agent })}
                 >
                   {agent.charAt(0).toUpperCase() + agent.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="settings-row">
+            <label className="settings-label">Input Send</label>
+            <div className="settings-toggle-group">
+              {([
+                { value: 'enter', label: 'Enter' },
+                { value: 'button', label: 'Button' },
+                { value: 'cmd-enter', label: 'Cmd+Enter' },
+              ] as { value: InputSendMode; label: string }[]).map(({ value, label }) => (
+                <button
+                  key={value}
+                  className={`settings-toggle-btn${inputSendMode === value ? ' active' : ''}`}
+                  onClick={() => updateSettings({ inputSendMode: value })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="settings-row">
+            <label className="settings-label">Input Submit</label>
+            <div className="settings-toggle-group">
+              {([
+                { value: 'direct', label: lang === 'ja' ? '直接実行' : 'Direct' },
+                { value: 'paste', label: lang === 'ja' ? '貼り付け' : 'Paste' },
+              ] as { value: InputSubmitMode; label: string }[]).map(({ value, label }) => (
+                <button
+                  key={value}
+                  className={`settings-toggle-btn${inputSubmitMode === value ? ' active' : ''}`}
+                  onClick={() => updateSettings({ inputSubmitMode: value })}
+                >
+                  {label}
                 </button>
               ))}
             </div>

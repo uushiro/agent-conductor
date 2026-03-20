@@ -36,6 +36,9 @@ export const strings = {
     addTask: 'タスクを追加...',
     tasks: 'タスク',
     remaining: '件 残り',
+    inputPlaceholderEnter: 'Enter で送信、Shift+Enter で改行',
+    inputPlaceholderCmdEnter: 'Cmd+Enter で送信、Enter で改行',
+    inputPlaceholderButton: 'テキストを入力して Send を押す',
   },
   en: {
     openInEditor: 'Open in Editor',
@@ -70,6 +73,9 @@ export const strings = {
     addTask: 'Add a task...',
     tasks: 'Tasks',
     remaining: 'remaining',
+    inputPlaceholderEnter: 'Enter to send, Shift+Enter for new line',
+    inputPlaceholderCmdEnter: 'Cmd+Enter to send, Enter for new line',
+    inputPlaceholderButton: 'Type text and press Send',
   },
 } satisfies Record<Lang, Record<string, string>>
 
