@@ -70,16 +70,7 @@ export function Terminal({ tabId, isActive, fontSize }: TerminalProps) {
         (ev.metaKey && ev.key === 'w') || // Cmd+W
         (ev.metaKey && ev.key === 't') // Cmd+T
       if (isTabSwitch) {
-        document.dispatchEvent(new KeyboardEvent('keydown', {
-          key: ev.key,
-          code: ev.code,
-          metaKey: ev.metaKey,
-          ctrlKey: ev.ctrlKey,
-          shiftKey: ev.shiftKey,
-          altKey: ev.altKey,
-          bubbles: true,
-        }))
-        return false
+        return false // xtermに処理させず、元のイベントのバブリングでdocumentハンドラに届ける
       }
 
       if ((ev.key === 'Backspace' || ev.key === 'Delete') && term.hasSelection()) {

@@ -81,20 +81,21 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
     } else {
       window.electronAPI.sendTerminalInput(activeTabId, fullText)
     }
+    const hasAttachments = attachments.length > 0
+    setText('')
+    setAttachments([])
     if (inputSubmitMode === 'direct') {
       // 添付ありの場合、Claude Codeが [Image #1] (↑ to select) の選択UIを出すため
       // 1回目の\rでそのUIをスキップ、2回目の\rで本送信
-      const enterCount = attachments.length > 0 ? 2 : 1
+      const enterCount = hasAttachments ? 2 : 1
       for (let i = 0; i < enterCount; i++) {
         setTimeout(() => {
           window.electronAPI.sendTerminalInput(activeTabId, '\r')
-        }, 80 + i * 150)
+        }, 300 + i * 600)
       }
     }
-    setText('')
-    setAttachments([])
     setTimeout(() => textareaRef.current?.focus(), 30)
-  }, [text, attachments, activeTabId, inputSubmitMode, onClose])
+  }, [text, attachments, activeTabId, inputSubmitMode])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Escape') {
