@@ -1,4 +1,4 @@
-const VERSION = '2.4.0'
+import { version as VERSION } from '../../package.json'
 
 export function SplashScreen() {
   return (

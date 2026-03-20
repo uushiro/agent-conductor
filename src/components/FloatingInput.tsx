@@ -27,6 +27,26 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
   })
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const attachmentsRef = useRef<HTMLDivElement>(null)
+  const barRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const bar = barRef.current
+    if (!bar) return
+    const onDragOver = (e: DragEvent) => { e.preventDefault(); e.stopPropagation() }
+    const onDrop = (e: DragEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const files = Array.from(e.dataTransfer?.files ?? [])
+      const paths = files.map((f) => window.electronAPI.getPathForFile(f)).filter(Boolean)
+      if (paths.length > 0) setAttachments((prev) => [...new Set([...prev, ...paths])])
+    }
+    bar.addEventListener('dragover', onDragOver)
+    bar.addEventListener('drop', onDrop)
+    return () => {
+      bar.removeEventListener('dragover', onDragOver)
+      bar.removeEventListener('drop', onDrop)
+    }
+  }, [])
 
   useEffect(() => {
     if (visible) {
@@ -85,13 +105,22 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
     setText('')
     setAttachments([])
     if (inputSubmitMode === 'direct') {
-      // 添付ありの場合、Claude Codeが [Image #1] (↑ to select) の選択UIを出すため
-      // 1回目の\rでそのUIをスキップ、2回目の\rで本送信
-      const enterCount = hasAttachments ? 2 : 1
-      for (let i = 0; i < enterCount; i++) {
+      if (hasAttachments) {
+        // 画像UIが確実に出てから dismiss → submit
+        // 1回目: 画像UIをdismiss（十分な余裕を持たせる）
         setTimeout(() => {
           window.electronAPI.sendTerminalInput(activeTabId, '\r')
-        }, 300 + i * 600)
+          // 2回目: dismissが完了してからsubmit
+          setTimeout(() => {
+            window.electronAPI.sendTerminalInput(activeTabId, '\r')
+          }, 1000)
+        }, 800)
+      } else {
+        // 改行ありのブラケットペーストはClaude Codeの処理を待つ
+        const delay = fullText.includes('\n') ? 400 : 80
+        setTimeout(() => {
+          window.electronAPI.sendTerminalInput(activeTabId, '\r')
+        }, delay)
       }
     }
     setTimeout(() => textareaRef.current?.focus(), 30)
@@ -131,21 +160,12 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
 
   return (
     <>
-      <div className="terminal-input-bar">
+      <div ref={barRef} className="terminal-input-bar">
         <div className="terminal-input-resize-handle" onMouseDown={handleResizeMouseDown} />
         <div className="terminal-input-inner">
           <div
             className="terminal-input-field"
             data-has-attachments={attachments.length > 0 || undefined}
-            onDragOver={(e) => { e.preventDefault(); e.stopPropagation() }}
-            onDrop={(e) => {
-              e.preventDefault()
-              e.stopPropagation()
-              const files = Array.from(e.dataTransfer.files).map((f) => (f as unknown as { path: string }).path).filter(Boolean)
-              if (files.length > 0) {
-                setAttachments((prev) => [...new Set([...prev, ...files])])
-              }
-            }}
           >
             <textarea
               ref={textareaRef}

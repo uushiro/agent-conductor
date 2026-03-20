@@ -61,6 +61,7 @@ export interface ElectronAPI {
   openFileDialog: () => Promise<string[]>
   writeClipboardImage: (filePath: string) => Promise<boolean>
   saveClipboardImage: (filePath: string) => Promise<boolean>
+  getPathForFile: (file: File) => string
   pasteToWindow: () => Promise<void>
 }
 

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // Terminal lifecycle
@@ -106,5 +106,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openFileDialog: () => ipcRenderer.invoke('dialog:open-file') as Promise<string[]>,
   writeClipboardImage: (filePath: string) => ipcRenderer.invoke('clipboard:write-image', filePath) as Promise<boolean>,
   saveClipboardImage: (filePath: string) => ipcRenderer.invoke('clipboard:save-image', filePath) as Promise<boolean>,
+  getPathForFile: (file: File) => webUtils.getPathForFile(file),
   pasteToWindow: () => ipcRenderer.invoke('window:paste'),
 })

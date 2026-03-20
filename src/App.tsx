@@ -13,7 +13,9 @@ export function App() {
   const { fileTreeVisible, updateSettings, loaded } = useSettings()
   const [activeTabId, setActiveTabId] = useState<string>('')
   const [showQuitConfirm, setShowQuitConfirm] = useState(false)
-  const [showFloatingInput, setShowFloatingInput] = useState(false)
+  const [showFloatingInput, setShowFloatingInput] = useState(
+    () => localStorage.getItem('input-bar-open') !== 'false'
+  )
   const [inputBarHeight, setInputBarHeight] = useState(100)
   const [tabBottom, setTabBottom] = useState(0)
   const tabTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -44,8 +46,9 @@ export function App() {
     return () => { offConfirm(); offCancel() }
   }, [])
 
-  // Sync tabBottom with showFloatingInput (delay on close)
+  // Sync tabBottom with showFloatingInput (delay on close) + persist state
   useEffect(() => {
+    localStorage.setItem('input-bar-open', String(showFloatingInput))
     if (tabTimerRef.current) clearTimeout(tabTimerRef.current)
     if (showFloatingInput) {
       setTabBottom(inputBarHeight)
