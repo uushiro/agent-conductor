@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { useSettings, DefaultAgent, InputSendMode, InputSubmitMode } from '../contexts/SettingsContext'
+import { useSettings, DefaultAgent, InputSendMode, InputSubmitMode, WidgetId, WidgetConfig, DEFAULT_WIDGETS } from '../contexts/SettingsContext'
 import { useLang, strings } from '../contexts/LangContext'
 
 interface Props {
@@ -27,7 +27,7 @@ const PRESET_EDITORS = [
 ]
 
 export function SettingsModal({ onClose }: Props) {
-  const { theme, fontSize, editorCommand, customEditors, accentColor, customColors, defaultAgent, inputSendMode, inputSubmitMode, updateSettings } = useSettings()
+  const { theme, fontSize, editorCommand, customEditors, accentColor, customColors, defaultAgent, inputSendMode, inputSubmitMode, sidebarWidgets, resumeProjectDirs, updateSettings } = useSettings()
   const { lang, toggleLang } = useLang()
   const t = strings[lang]
   const [addingEditor, setAddingEditor] = useState(false)
@@ -249,6 +249,82 @@ export function SettingsModal({ onClose }: Props) {
                   {label}
                 </button>
               ))}
+            </div>
+          </div>
+
+          {/* Sidebar Widgets */}
+          <div className="settings-section-divider">Sidebar Widgets</div>
+          <div className="settings-row settings-row-editor">
+            <label className="settings-label">Widgets</label>
+            <div className="settings-widget-list">
+              {(sidebarWidgets ?? DEFAULT_WIDGETS).map((w, idx) => {
+                const widgets = sidebarWidgets ?? DEFAULT_WIDGETS
+                const LABEL: Record<WidgetId, string> = { sessions: 'Sessions', tasks: 'Tasks', resume: 'Resume' }
+                return (
+                  <div key={w.id} className="settings-widget-row">
+                    <button
+                      className={`settings-toggle-btn${w.enabled ? ' active' : ''}`}
+                      style={{ minWidth: 70 }}
+                      onClick={() => {
+                        const next = widgets.map((x) => x.id === w.id ? { ...x, enabled: !x.enabled } : x)
+                        updateSettings({ sidebarWidgets: next })
+                      }}
+                    >
+                      {LABEL[w.id]}
+                    </button>
+                    <div className="settings-widget-arrows">
+                      <button
+                        className="settings-arrow-btn"
+                        disabled={idx === 0}
+                        onClick={() => {
+                          const next = [...widgets]
+                          ;[next[idx - 1], next[idx]] = [next[idx], next[idx - 1]]
+                          updateSettings({ sidebarWidgets: next })
+                        }}
+                      >▲</button>
+                      <button
+                        className="settings-arrow-btn"
+                        disabled={idx === widgets.length - 1}
+                        onClick={() => {
+                          const next = [...widgets]
+                          ;[next[idx], next[idx + 1]] = [next[idx + 1], next[idx]]
+                          updateSettings({ sidebarWidgets: next })
+                        }}
+                      >▼</button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+
+          {/* Resume project dirs */}
+          <div className="settings-row settings-row-editor">
+            <label className="settings-label">Resume Dirs</label>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+                {(resumeProjectDirs ?? []).length === 0
+                  ? 'All projects (default)'
+                  : `${resumeProjectDirs.length} dir(s) selected`}
+              </div>
+              {(resumeProjectDirs ?? []).map((dir, idx) => (
+                <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
+                  <span style={{ flex: 1, fontSize: 11, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dir}</span>
+                  <button
+                    className="settings-arrow-btn"
+                    onClick={() => updateSettings({ resumeProjectDirs: (resumeProjectDirs ?? []).filter((_, i) => i !== idx) })}
+                  >×</button>
+                </div>
+              ))}
+              <button
+                className="settings-editor-add-btn"
+                onClick={async () => {
+                  const paths = await window.electronAPI.openFileDialog()
+                  if (paths && paths.length > 0) {
+                    updateSettings({ resumeProjectDirs: [...(resumeProjectDirs ?? []), ...paths] })
+                  }
+                }}
+              >+ Add dir</button>
             </div>
           </div>
 

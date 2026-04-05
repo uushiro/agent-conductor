@@ -1033,6 +1033,82 @@ function createWindow() {
     shell.openExternal(url)
   })
 
+  // Resume sessions: list Claude session files from ~/.claude/projects/
+  ipcMain.handle('resume:list-sessions', async (_event, projectDirs: string[] | null) => {
+    const claudeDir = path.join(os.homedir(), '.claude', 'projects')
+    let dirs: string[]
+    if (projectDirs && projectDirs.length > 0) {
+      dirs = projectDirs
+    } else {
+      try {
+        dirs = fs.readdirSync(claudeDir)
+          .map((d) => path.join(claudeDir, d))
+          .filter((d) => fs.statSync(d).isDirectory())
+      } catch {
+        dirs = []
+      }
+    }
+
+    const sessions: Array<{
+      id: string
+      title: string
+      projectDir: string
+      updatedAt: number
+      sizeBytes: number
+    }> = []
+
+    for (const dir of dirs) {
+      let files: string[]
+      try {
+        files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'))
+      } catch {
+        continue
+      }
+      for (const file of files) {
+        const filePath = path.join(dir, file)
+        let stat: fs.Stats
+        try { stat = fs.statSync(filePath) } catch { continue }
+        const id = file.replace('.jsonl', '')
+        // Read first few KB to extract title (first user message)
+        let title = id
+        try {
+          const buf = Buffer.alloc(2048)
+          const fd = fs.openSync(filePath, 'r')
+          const bytesRead = fs.readSync(fd, buf, 0, 2048, 0)
+          fs.closeSync(fd)
+          const text = buf.toString('utf8', 0, bytesRead)
+          for (const line of text.split('\n')) {
+            if (!line.trim()) continue
+            try {
+              const obj = JSON.parse(line)
+              if (obj.type === 'user' && obj.parentUuid === null) {
+                const content = obj.message?.content
+                if (typeof content === 'string' && content.trim()) {
+                  title = content.trim().split('\n')[0].slice(0, 120)
+                } else if (Array.isArray(content)) {
+                  const textPart = content.find((c: { type: string; text?: string }) => c.type === 'text')
+                  if (textPart?.text) title = textPart.text.trim().split('\n')[0].slice(0, 120)
+                }
+                break
+              }
+            } catch { /* skip malformed lines */ }
+          }
+        } catch { /* skip on read error */ }
+
+        sessions.push({
+          id,
+          title,
+          projectDir: dir,
+          updatedAt: stat.mtimeMs,
+          sizeBytes: stat.size,
+        })
+      }
+    }
+
+    sessions.sort((a, b) => b.updatedAt - a.updatedAt)
+    return sessions
+  })
+
   } // end ipcHandlersRegistered guard
 
   if (VITE_DEV_SERVER_URL && process.env.NODE_ENV === 'development') {

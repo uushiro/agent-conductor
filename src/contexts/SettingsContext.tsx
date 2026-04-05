@@ -8,6 +8,15 @@ export type InputSendMode = 'enter' | 'button' | 'cmd-enter'
 
 export type InputSubmitMode = 'direct' | 'paste'
 
+export type WidgetId = 'sessions' | 'tasks' | 'resume'
+export interface WidgetConfig { id: WidgetId; enabled: boolean }
+
+const DEFAULT_WIDGETS: WidgetConfig[] = [
+  { id: 'sessions', enabled: true },
+  { id: 'tasks', enabled: true },
+  { id: 'resume', enabled: true },
+]
+
 interface Settings {
   theme: Theme
   fontSize: number
@@ -21,6 +30,8 @@ interface Settings {
   fileTreePinned: boolean
   inputSendMode: InputSendMode
   inputSubmitMode: InputSubmitMode
+  sidebarWidgets: WidgetConfig[]
+  resumeProjectDirs: string[]
 }
 
 interface SettingsContextValue extends Settings {
@@ -41,7 +52,11 @@ const DEFAULTS: Settings = {
   fileTreePinned: false,
   inputSendMode: 'enter',
   inputSubmitMode: 'direct',
+  sidebarWidgets: DEFAULT_WIDGETS,
+  resumeProjectDirs: [],
 }
+
+export { DEFAULT_WIDGETS }
 
 const SettingsContext = createContext<SettingsContextValue>({
   ...DEFAULTS,

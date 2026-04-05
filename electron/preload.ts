@@ -108,4 +108,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveClipboardImage: (filePath: string) => ipcRenderer.invoke('clipboard:save-image', filePath) as Promise<boolean>,
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   pasteToWindow: () => ipcRenderer.invoke('window:paste'),
+  listResumeSessions: (projectDirs: string[] | null) =>
+    ipcRenderer.invoke('resume:list-sessions', projectDirs) as Promise<Array<{
+      id: string; title: string; projectDir: string; updatedAt: number; sizeBytes: number
+    }>>,
 })

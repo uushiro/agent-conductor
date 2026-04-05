@@ -63,6 +63,9 @@ export interface ElectronAPI {
   saveClipboardImage: (filePath: string) => Promise<boolean>
   getPathForFile: (file: File) => string
   pasteToWindow: () => Promise<void>
+  listResumeSessions: (projectDirs: string[] | null) => Promise<Array<{
+    id: string; title: string; projectDir: string; updatedAt: number; sizeBytes: number
+  }>>
 }
 
 declare global {

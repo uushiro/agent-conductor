@@ -5,6 +5,7 @@ import { useLang, strings } from '../contexts/LangContext'
 
 export interface TerminalTabsHandle {
   sendToNewTab: (prompt: string, agent: 'claude' | 'gemini' | 'codex') => void
+  resumeSession: (sessionId: string) => void
 }
 
 interface Tab {
@@ -57,6 +58,11 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
   }, [])
 
   async function restoreOrInit() {
+    // 開発環境では毎回まっさらなclaudeタブを開く
+    if (import.meta.env.DEV) {
+      createTab()
+      return
+    }
     const session = await window.electronAPI.loadSession()
     if (session && session.tabs.length > 0) {
       const restored: Tab[] = []
@@ -241,7 +247,18 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     sendToNewTab: (prompt: string, agent: 'claude' | 'gemini' | 'codex') => {
       createTab(agent, prompt)
     },
-  }), [createTab])
+    resumeSession: async (sessionId: string) => {
+      const tabId = await window.electronAPI.createTerminal(undefined, sessionId)
+      setTabs((prev) => [
+        ...prev,
+        { id: tabId, issue: '', detail: 'Terminal', customIssue: false, resuming: true },
+      ])
+      onActiveTabChange(tabId)
+      setTimeout(() => {
+        window.electronAPI.sendTerminalInput(tabId, `claude --resume ${sessionId}\r`)
+      }, 1000)
+    },
+  }), [createTab, onActiveTabChange])
 
   // Actual close logic (no confirmation)
   const doCloseTab = useCallback(
