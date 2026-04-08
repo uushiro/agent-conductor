@@ -486,13 +486,9 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
     }
   }
 
-  execFile('lsof', ['-a', '-p', String(ptyProcess.pid), '-d', 'cwd', '-Fn'], (err, stdout) => {
-    if (!err) {
-      const match = stdout.match(/^n(.+)$/m)
-      if (match) info.cwd = match[1]
-    }
-    tabInfo.set(id, info)
-  })
+  // cwd is now updated via OSC 7 escape sequences emitted by the shell hook.
+  // No lsof call needed here.
+  tabInfo.set(id, info)
 }
 
 function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty.spawn> } {
@@ -515,8 +511,41 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
   tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null, hadCodex: false, resuming: false })
   tabOrder.push(id)
 
+  // Inject shell hook to emit OSC 7 on every prompt (cwd tracking without lsof).
+  // OSC 7 format: \033]7;file://hostname/cwd\007
+  // We wait a tick so the shell is ready to accept input.
+  setTimeout(() => {
+    const shellName = path.basename(shell)
+    const hostname = os.hostname()
+    if (shellName === 'zsh') {
+      // precmd_functions is safe to append to even if user already defines precmd
+      ptyProcess.write(`precmd_ac_cwd() { printf "\\033]7;file://${hostname}$PWD\\007"; }; precmd_functions+=(precmd_ac_cwd)\r`)
+    } else if (shellName === 'bash') {
+      ptyProcess.write(`PROMPT_COMMAND='printf "\\033]7;file://${hostname}$PWD\\007"; '"$PROMPT_COMMAND"\r`)
+    } else if (shellName === 'fish') {
+      ptyProcess.write(`function __ac_cwd --on-event fish_prompt; printf "\\033]7;file://${hostname}$PWD\\007"; end\r`)
+    }
+    // For other shells, OSC 7 won't be emitted; cwd stays as initialCwd
+  }, 300)
+
   // Relay pty output → renderer, and buffer last output for sidebar
+  // Also parse OSC 7 sequences to track cwd without lsof.
   ptyProcess.onData((data: string) => {
+    // OSC 7: \033]7;file://hostname/path\007  or  \033]7;file://hostname/path\033\\
+    const osc7 = data.match(/\x1b\]7;file:\/\/[^\x07\x1b]*(?:\x07|\x1b\\)/)
+    if (osc7) {
+      const urlMatch = osc7[0].match(/\x1b\]7;file:\/\/([^\x07\x1b/]*)([^\x07\x1b]*)/)
+      if (urlMatch) {
+        try {
+          const decoded = decodeURIComponent(urlMatch[2])
+          const info = tabInfo.get(id)
+          if (info && decoded) {
+            info.cwd = decoded
+            tabInfo.set(id, info)
+          }
+        } catch { /* ignore decode errors */ }
+      }
+    }
     mainWindow?.webContents.send('terminal:data', id, data)
     const prev = tabLastOutput.get(id) || ''
     const combined = (prev + data).slice(-3000)
