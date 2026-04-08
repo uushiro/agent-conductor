@@ -1,6 +1,6 @@
 {
   "name": "agent-conductor",
-  "version": "2.7.1",
+  "version": "2.7.2",
   "description": "AI Agent Conductor for Claude Code",
   "author": "uushiro",
   "license": "MIT",
@@ -17,7 +17,9 @@
     "icon": "assets/icon.icns",
     "mac": {
       "category": "public.app-category.developer-tools",
-      "icon": "assets/icon.icns"
+      "icon": "assets/icon.icns",
+      "entitlements": "assets/entitlements.mac.plist",
+      "entitlementsInherit": "assets/entitlements.mac.plist"
     },
     "files": [
       "dist/**/*",
