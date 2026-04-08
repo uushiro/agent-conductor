@@ -1,6 +1,6 @@
 {
   "name": "agent-conductor",
-  "version": "2.7.0",
+  "version": "2.7.1",
   "description": "AI Agent Conductor for Claude Code",
   "author": "uushiro",
   "license": "MIT",

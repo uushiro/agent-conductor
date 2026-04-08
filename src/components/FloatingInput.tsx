@@ -92,16 +92,33 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
   const sendText = useCallback(async () => {
     if ((!text.trim() && attachments.length === 0) || !activeTabId) return
 
-    // 全ファイル（画像含む）をパスとしてメッセージに追記
-    const filePart = attachments.length > 0 ? '\n' + attachments.join('\n') : ''
-    const fullText = text + filePart
-    // 改行を含む場合はブラケットペーストモードで囲む（途中の\nがEnterとして実行されるのを防ぐ）
-    if (fullText.includes('\n')) {
-      window.electronAPI.sendTerminalInput(activeTabId, '\x1b[200~' + fullText + '\x1b[201~')
-    } else {
-      window.electronAPI.sendTerminalInput(activeTabId, fullText)
-    }
     const hasAttachments = attachments.length > 0
+
+    if (text && hasAttachments) {
+      // テキストとファイルパスを分けて送信する。
+      // まとめて送ると Claude Code がファイルパスを attachment として認識しない場合がある。
+      // 1. テキスト部分を送信
+      if (text.includes('\n')) {
+        window.electronAPI.sendTerminalInput(activeTabId, '\x1b[200~' + text + '\x1b[201~')
+      } else {
+        window.electronAPI.sendTerminalInput(activeTabId, text)
+      }
+      // 2. ファイルパスを別の bracket paste で追送
+      const filePart = '\n' + attachments.join('\n')
+      setTimeout(() => {
+        window.electronAPI.sendTerminalInput(activeTabId, '\x1b[200~' + filePart + '\x1b[201~')
+      }, 150)
+    } else {
+      // テキストのみ、またはファイルのみ
+      const filePart = hasAttachments ? '\n' + attachments.join('\n') : ''
+      const fullText = text + filePart
+      if (fullText.includes('\n')) {
+        window.electronAPI.sendTerminalInput(activeTabId, '\x1b[200~' + fullText + '\x1b[201~')
+      } else {
+        window.electronAPI.sendTerminalInput(activeTabId, fullText)
+      }
+    }
+
     setText('')
     setAttachments([])
     if (inputSubmitMode === 'direct') {
@@ -117,7 +134,7 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
         }, 800)
       } else {
         // 改行ありのブラケットペーストはClaude Codeの処理を待つ
-        const delay = fullText.includes('\n') ? 400 : 80
+        const delay = text.includes('\n') ? 400 : 80
         setTimeout(() => {
           window.electronAPI.sendTerminalInput(activeTabId, '\r')
         }, delay)
