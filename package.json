@@ -9,17 +9,22 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "dist": "npm run build && electron-builder --mac"
+    "dist": "npm run build && electron-builder --mac -c.directories.output=/tmp/agent-conductor-dist"
   },
   "build": {
     "appId": "com.uushiro.agent-conductor",
     "productName": "Agent Conductor",
+    "afterPack": "scripts/strip-xattr.cjs",
     "icon": "assets/icon.icns",
     "mac": {
       "category": "public.app-category.developer-tools",
       "icon": "assets/icon.icns",
       "entitlements": "assets/entitlements.mac.plist",
-      "entitlementsInherit": "assets/entitlements.mac.plist"
+      "entitlementsInherit": "assets/entitlements.mac.plist",
+      "identity": "Agent Conductor Dev",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "notarize": false
     },
     "files": [
       "dist/**/*",
