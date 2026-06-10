@@ -48,6 +48,101 @@ const emittedTaskTitles = new Set<string>()
 // tabId → timeout handle while watching for --resume failure ("No conversation found")
 const tabResumeWatch = new Map<string, ReturnType<typeof setTimeout>>()
 
+// --- Agent-to-agent messaging ([[SEND: dest :: body]]) ---
+interface AgentMsg {
+  fromTabId: string
+  fromName: string
+  toTabId: string
+  body: string
+  queuedAt: number
+}
+const agentMsgQueue: AgentMsg[] = []
+// "dest::body" → last-emitted timestamp (dedup: TUI redraws re-print the same [[SEND:]])
+const sentAgentMsgKeys = new Map<string, number>()
+const AGENT_MSG_DEDUP_MS = 60000
+// Destination is considered busy if its PTY produced output within this window
+const AGENT_MSG_BUSY_MS = 3000
+
+// Resolve a destination tab by issue (tab name): exact match first, then prefix match.
+// Returns null when not found or ambiguous.
+function resolveTabByName(name: string, excludeTabId: string): string | null {
+  const candidates = tabOrder.filter((id) => id !== excludeTabId)
+  const exact = candidates.filter((id) => (tabInfo.get(id)?.issue || '') === name)
+  if (exact.length === 1) return exact[0]
+  if (exact.length > 1) return null
+  const prefix = candidates.filter((id) => {
+    const issue = tabInfo.get(id)?.issue || ''
+    return issue !== '' && issue.startsWith(name)
+  })
+  if (prefix.length === 1) return prefix[0]
+  return null
+}
+
+// Inject a message into the destination PTY via bracketed paste, then submit with \r
+function deliverAgentMsg(msg: AgentMsg) {
+  const proc = ptyProcesses.get(msg.toTabId)
+  if (!proc) return
+  const text = `[from: ${msg.fromName}] ${msg.body}`
+  proc.write('\x1b[200~' + text + '\x1b[201~')
+  setTimeout(() => {
+    const p = ptyProcesses.get(msg.toTabId)
+    if (p) p.write('\r')
+  }, 150)
+  mainWindow?.webContents.send('agent-msg:notify', {
+    type: 'delivered', from: msg.fromName, dest: tabInfo.get(msg.toTabId)?.issue || msg.toTabId, body: msg.body,
+  })
+}
+
+// Handle a detected [[SEND: dest :: body]] from tab `fromTabId`
+function handleAgentSend(fromTabId: string, destName: string, body: string) {
+  const now = Date.now()
+  const key = `${destName}::${body}`
+  const last = sentAgentMsgKeys.get(key) ?? 0
+  if (now - last < AGENT_MSG_DEDUP_MS) return
+  sentAgentMsgKeys.set(key, now)
+  // GC stale dedup keys
+  if (sentAgentMsgKeys.size > 200) {
+    for (const [k, t] of sentAgentMsgKeys) {
+      if (now - t > AGENT_MSG_DEDUP_MS) sentAgentMsgKeys.delete(k)
+    }
+  }
+
+  const fromName = tabInfo.get(fromTabId)?.issue || fromTabId
+  const toTabId = resolveTabByName(destName, fromTabId)
+  if (!toTabId) {
+    console.log(`[agent-msg] 宛先が見つからない: "${destName}" (from: ${fromName})`)
+    mainWindow?.webContents.send('agent-msg:notify', {
+      type: 'error', from: fromName, dest: destName, body,
+    })
+    return
+  }
+  // Always enqueue; the 1s poller delivers when the destination is idle (FIFO per destination)
+  agentMsgQueue.push({ fromTabId, fromName, toTabId, body, queuedAt: now })
+}
+
+// Queue poller: deliver pending messages to idle destinations (at most 1 per destination per tick)
+setInterval(() => {
+  if (agentMsgQueue.length === 0) return
+  const now = Date.now()
+  const deliveredTo = new Set<string>()
+  for (let i = 0; i < agentMsgQueue.length; ) {
+    const msg = agentMsgQueue[i]
+    if (!ptyProcesses.has(msg.toTabId)) {
+      console.log(`[agent-msg] 宛先タブが閉じられたため破棄: ${msg.toTabId}`)
+      agentMsgQueue.splice(i, 1)
+      continue
+    }
+    const lastOut = tabLastOutputAt.get(msg.toTabId) ?? 0
+    if (!deliveredTo.has(msg.toTabId) && now - lastOut >= AGENT_MSG_BUSY_MS) {
+      agentMsgQueue.splice(i, 1)
+      deliveredTo.add(msg.toTabId)
+      deliverAgentMsg(msg)
+      continue
+    }
+    i++
+  }
+}, 1000)
+
 // Strip ANSI/OSC escape codes and extract last meaningful line
 function extractLastLine(raw: string): string {
   const stripped = raw
@@ -603,10 +698,18 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
           const tasksJson = match[1].trim()
           mainWindow?.webContents.send('task:set-all', tasksJson)
         } catch { /* ignore */ }
-        lastMatchEnd = match.index! + match[0].length
+        lastMatchEnd = Math.max(lastMatchEnd, match.index! + match[0].length)
       }
-      // Keep only the unmatched tail for split-chunk detection (max 100 chars)
-      tabTaskScanBuf.set(id, stripped.slice(Math.max(lastMatchEnd, stripped.length - 100)))
+      // Detect [[SEND: dest :: body]] pattern — agent-to-agent message routing
+      for (const match of stripped.matchAll(/\[\[SEND:\s*([^\]:]+?)\s*::\s*([\s\S]+?)\]\]/g)) {
+        const dest = match[1].trim()
+        const body = match[2].trim()
+        if (dest && body) handleAgentSend(id, dest, body)
+        lastMatchEnd = Math.max(lastMatchEnd, match.index! + match[0].length)
+      }
+      // Keep only the unmatched tail for split-chunk detection
+      // (500 chars: [[SEND:]] bodies can be long and split across chunks)
+      tabTaskScanBuf.set(id, stripped.slice(Math.max(lastMatchEnd, stripped.length - 500)))
     }
   })
 
@@ -768,6 +871,8 @@ function createWindow() {
     tabTaskScanBuf.clear()
     tabTaskCooldown.clear()
     emittedTaskTitles.clear()
+    agentMsgQueue.length = 0
+    sentAgentMsgKeys.clear()
     for (const t of tabResumeWatch.values()) clearTimeout(t)
     tabResumeWatch.clear()
     for (const w of tabSessionWatchers.values()) clearInterval(w)

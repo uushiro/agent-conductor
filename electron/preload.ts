@@ -60,6 +60,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('task:add', listener)
   },
 
+  // Agent-to-agent message notifications ([[SEND: dest :: body]] routing results)
+  onAgentMsgNotify: (cb: (payload: { type: 'delivered' | 'error'; from: string; dest: string; body: string }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: { type: 'delivered' | 'error'; from: string; dest: string; body: string }) => cb(payload)
+    ipcRenderer.on('agent-msg:notify', listener)
+    return () => ipcRenderer.removeListener('agent-msg:notify', listener)
+  },
+
   // Set all tasks at once (for external task management)
   onTaskSetAll: (cb: (tasksJson: string) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, tasksJson: string) => cb(tasksJson)
