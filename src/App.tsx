@@ -136,6 +136,18 @@ export function App() {
     setFocusedPane(0)
   }, [updateSplitPair])
 
+  // Swap the left/right panes (Chrome-style「分割ビューを並べ替える」).
+  // The focused pane index flips so focus stays on the same tab; the divider
+  // position is left untouched. The tab-bar capsule order self-heals via the
+  // adjacency effect in TerminalTabs (pair[0] is always placed on the left).
+  const swapSplit = useCallback(() => {
+    const [left, right] = panesRef.current
+    if (right === null) return
+    updateSplitPair([right, left])
+    setPanes([right, left])
+    setFocusedPane(focusedPaneRef.current === 0 ? 1 : 0)
+  }, [updateSplitPair])
+
   // Close the right pane (back to single view). The pair memory is dissolved.
   const closeRightPane = useCallback(() => {
     updateSplitPair(null)
@@ -247,6 +259,7 @@ export function App() {
             onActiveTabChange={selectTab}
             onAddToSplit={addToSplit}
             onRemoveFromSplit={removeFromSplit}
+            onSwapSplit={swapSplit}
             onCloseRightPane={closeRightPane}
             onTabRemoved={handleTabRemoved}
           />

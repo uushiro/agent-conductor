@@ -76,7 +76,7 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
         (ev.metaKey && ev.altKey && (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight')) || // Cmd+Option+←/→
         (ev.metaKey && ev.key === 'w') || // Cmd+W
         (ev.metaKey && ev.key === 't') || // Cmd+T
-        (ev.metaKey && (ev.key === '\\' || ev.key === '¥')) // Cmd+\ (split toggle, JIS: ¥)
+        (ev.metaKey && (ev.key === '\\' || ev.key === '¥' || ev.key === '|')) // Cmd+\ (split toggle) / Cmd+Shift+\ (split swap, Shift+\='|')
       if (isTabSwitch) {
         return false // xtermに処理させず、元のイベントのバブリングでdocumentハンドラに届ける
       }

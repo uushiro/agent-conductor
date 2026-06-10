@@ -32,11 +32,12 @@ interface Props {
   onActiveTabChange: (tabId: string) => void
   onAddToSplit: (tabId: string) => void
   onRemoveFromSplit: (tabId: string) => void
+  onSwapSplit: () => void
   onCloseRightPane: () => void
   onTabRemoved: (tabId: string, fallbackId: string) => void
 }
 
-export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function TerminalTabs({ activeTabId, panes, splitPair, focusedPane, onActiveTabChange, onAddToSplit, onRemoveFromSplit, onCloseRightPane, onTabRemoved }, ref) {
+export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function TerminalTabs({ activeTabId, panes, splitPair, focusedPane, onActiveTabChange, onAddToSplit, onRemoveFromSplit, onSwapSplit, onCloseRightPane, onTabRemoved }, ref) {
   const { fontSize, defaultAgent } = useSettings()
   const { lang } = useLang()
   const t = strings[lang]
@@ -521,6 +522,13 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         createTab()
         return
       }
+      // Cmd+Shift+\: swap split panes (Chrome-style「分割ビューを並べ替える」).
+      // Shift+\ emits '|' on US/JIS layouts; some layouts keep '\' (or '¥' on JIS)
+      if (e.shiftKey && (e.key === '|' || e.key === '\\' || e.key === '¥')) {
+        e.preventDefault()
+        if (panes[1] !== null) onSwapSplit()
+        return
+      }
       // Cmd+\: toggle split view (JIS keyboards emit '¥' for the same physical key)
       if (e.key === '\\' || e.key === '¥') {
         e.preventDefault()
@@ -543,7 +551,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [activeTabId, onActiveTabChange, createTab, panes, onAddToSplit, onCloseRightPane])
+  }, [activeTabId, onActiveTabChange, createTab, panes, onAddToSplit, onSwapSplit, onCloseRightPane])
 
   if (tabs.length === 0) {
     return null
@@ -764,15 +772,26 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
             style={{ left: ctxMenu.x, top: ctxMenu.y }}
           >
             {inSplit ? (
-              <button
-                className="tab-agent-item"
-                onClick={() => {
-                  onRemoveFromSplit(ctxMenu.tabId)
-                  setCtxMenu(null)
-                }}
-              >
-                分割ビューから削除
-              </button>
+              <>
+                <button
+                  className="tab-agent-item"
+                  onClick={() => {
+                    onSwapSplit()
+                    setCtxMenu(null)
+                  }}
+                >
+                  分割ビューを並べ替える
+                </button>
+                <button
+                  className="tab-agent-item"
+                  onClick={() => {
+                    onRemoveFromSplit(ctxMenu.tabId)
+                    setCtxMenu(null)
+                  }}
+                >
+                  分割ビューから削除
+                </button>
+              </>
             ) : (
               tabs.length > 1 && splitTarget !== null && (
                 <button
