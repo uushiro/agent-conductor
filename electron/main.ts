@@ -64,12 +64,34 @@ const agentMsgQueue: AgentMsg[] = []
 const tabSentAgentMsgKeys = new Map<string, Set<string>>()
 const AGENT_MSG_DEDUP_MAX_PER_TAB = 200
 
+// Clean TUI line-wrap artifacts out of an extracted [[SEND:]] body.
+// Claude TUI wraps long [[SEND:]] blocks at the pane width; every repaint after a
+// resize/split re-wraps at a different column, injecting spaces/newlines mid-word
+// ("天気予 報", "北 東の風"). Join the body back into one line:
+//   - whitespace run flanked by wide (CJK etc., >= U+2E80) chars on BOTH sides → removed
+//     (no legitimate space exists inside Japanese words)
+//   - any other whitespace run → collapsed to a single space (preserves English word
+//     boundaries; a residual space at a CJK/ASCII border is acceptable cosmetic noise)
+function cleanAgentMsgBody(body: string): string {
+  const isWide = (c: string) => c.charCodeAt(0) >= 0x2e80
+  return body.trim().replace(/\s+/g, (ws: string, idx: number, str: string) => {
+    const prev = str[idx - 1]
+    const next = str[idx + ws.length]
+    return prev && next && isWide(prev) && isWide(next) ? '' : ' '
+  })
+}
+
 // Compact dedup key: [[SEND:]] bodies can be long, so hash them (djb2) instead of
 // storing full text. Length is appended to further reduce collision odds.
+// ALL whitespace is stripped before hashing: wrap positions differ between repaints
+// (see cleanAgentMsgBody), so the same logical message must map to one key regardless
+// of where spaces/newlines landed. Dest is normalized the same way.
 function agentMsgDedupKey(dest: string, body: string): string {
+  const normBody = body.replace(/\s+/g, '')
+  const normDest = dest.replace(/\s+/g, '')
   let h = 5381
-  for (let i = 0; i < body.length; i++) h = (Math.imul(h, 33) ^ body.charCodeAt(i)) >>> 0
-  return `${dest}::${h.toString(36)}:${body.length}`
+  for (let i = 0; i < normBody.length; i++) h = (Math.imul(h, 33) ^ normBody.charCodeAt(i)) >>> 0
+  return `${normDest}::${h.toString(36)}:${normBody.length}`
 }
 // Destination is considered busy if its PTY produced output within this window
 const AGENT_MSG_BUSY_MS = 3000
@@ -137,6 +159,11 @@ function parseUserSendCommand(line: string): { dest: string; body: string } | nu
 function handleAgentSend(fromTabId: string, destName: string, body: string, opts?: { bypassDedup?: boolean }) {
   const now = Date.now()
   if (!opts?.bypassDedup) {
+    // Output-side detections come from PTY repaints where the TUI may have re-wrapped
+    // the [[SEND:]] block: normalize the dest and strip wrap artifacts from the body
+    // so the delivered text is clean. (User-typed path is never wrapped — left as-is.)
+    destName = destName.replace(/\s+/g, ' ').trim()
+    body = cleanAgentMsgBody(body)
     let keys = tabSentAgentMsgKeys.get(fromTabId)
     if (!keys) {
       keys = new Set<string>()
