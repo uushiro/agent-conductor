@@ -19,6 +19,10 @@ export function App() {
   focusedPaneRef.current = focusedPane
   const panesRef = useRef(panes)
   panesRef.current = panes
+  // Remembered split pair (Chrome-style). `panes` is what is currently displayed;
+  // the pair survives while a non-pair tab is shown solo, so clicking a pair tab
+  // restores the split. Cleared by removeFromSplit / closeRightPane / closing a pair tab.
+  const splitPairRef = useRef<[string, string] | null>(null)
   const activeTabId = focusedPane === 1 && panes[1] !== null ? panes[1] : panes[0]
   const [showQuitConfirm, setShowQuitConfirm] = useState(false)
   const [showFloatingInput, setShowFloatingInput] = useState(
@@ -78,22 +82,19 @@ export function App() {
     return () => document.removeEventListener('keydown', handler)
   }, [])
 
-  // Select a tab: show it in the focused pane (or focus the pane already showing it)
+  // Select a tab (tab bar click / Cmd+1-9 / terminal focus), Chrome-style:
+  // - tab belongs to the remembered split pair → show the pair (restore split) and focus its pane
+  // - otherwise → show the tab alone, full width (the pair stays remembered)
   const selectTab = useCallback((tabId: string) => {
     if (!tabId) return
-    setPanes((prev) => {
-      if (prev[0] === tabId) {
-        setFocusedPane(0)
-        return prev
-      }
-      if (prev[1] === tabId) {
-        setFocusedPane(1)
-        return prev
-      }
-      const target = focusedPaneRef.current === 1 && prev[1] !== null ? 1 : 0
-      setFocusedPane(target)
-      return target === 1 ? [prev[0], tabId] : [tabId, prev[1]]
-    })
+    const pair = splitPairRef.current
+    if (pair && (tabId === pair[0] || tabId === pair[1])) {
+      setPanes((prev) => (prev[0] === pair[0] && prev[1] === pair[1] ? prev : [pair[0], pair[1]]))
+      setFocusedPane(tabId === pair[0] ? 0 : 1)
+      return
+    }
+    setPanes((prev) => (prev[0] === tabId && prev[1] === null ? prev : [tabId, null]))
+    setFocusedPane(0)
   }, [])
 
   // Add a tab to the split view (Chrome-style「新しい分割ビューにタブを追加」):
@@ -107,33 +108,42 @@ export function App() {
       return
     }
     if (right === null || focusedPaneRef.current === 0) {
+      splitPairRef.current = [left, tabId]
       setPanes([left, tabId])
       setFocusedPane(1)
     } else {
+      splitPairRef.current = [tabId, right]
       setPanes([tabId, right])
       setFocusedPane(0)
     }
   }, [])
 
   // Remove a tab from the split view (Chrome-style「分割ビューから削除」):
-  // the other pane's tab remains shown alone
+  // the other pane's tab remains shown alone. The pair memory is dissolved.
   const removeFromSplit = useCallback((tabId: string) => {
     const [left, right] = panesRef.current
     if (right === null) return
     if (tabId === left) setPanes([right, null])
     else if (tabId === right) setPanes([left, null])
     else return
+    splitPairRef.current = null
     setFocusedPane(0)
   }, [])
 
-  // Close the right pane (back to single view)
+  // Close the right pane (back to single view). The pair memory is dissolved.
   const closeRightPane = useCallback(() => {
+    splitPairRef.current = null
     setPanes((prev) => (prev[1] === null ? prev : [prev[0], null]))
     setFocusedPane(0)
   }, [])
 
   // A tab was closed: repair pane assignments (fallbackId = neighbor tab chosen by TerminalTabs)
   const handleTabRemoved = useCallback((tabId: string, fallbackId: string) => {
+    const pair = splitPairRef.current
+    if (pair && (pair[0] === tabId || pair[1] === tabId)) {
+      // A pair member was closed → dissolve the pair memory
+      splitPairRef.current = null
+    }
     setPanes((prev) => {
       let [left, right] = prev
       if (right === tabId) {
