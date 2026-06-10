@@ -28,7 +28,7 @@ interface ClosedTabEntry {
   issue: string
   cwd: string
   claudeSessionId: string | null
-  agent: 'claude' | 'gemini'
+  agent: 'claude' | 'gemini' | 'codex'
   closedAt: number
 }
 const closedTabsHistory: ClosedTabEntry[] = []
@@ -57,9 +57,20 @@ interface AgentMsg {
   queuedAt: number
 }
 const agentMsgQueue: AgentMsg[] = []
-// "dest::body" → last-emitted timestamp (dedup: TUI redraws re-print the same [[SEND:]])
-const sentAgentMsgKeys = new Map<string, number>()
-const AGENT_MSG_DEDUP_MS = 60000
+// srcTabId → set of "dest::bodyHash" keys already sent from that tab (dedup: TUI redraws
+// re-print the same [[SEND:]] indefinitely — scroll/resize/turn-end repaints can happen
+// minutes later, so dedup lasts for the tab's whole lifetime, not a TTL).
+// Cleared per-tab on terminal:close, globally on session:load. LRU-capped per tab.
+const tabSentAgentMsgKeys = new Map<string, Set<string>>()
+const AGENT_MSG_DEDUP_MAX_PER_TAB = 200
+
+// Compact dedup key: [[SEND:]] bodies can be long, so hash them (djb2) instead of
+// storing full text. Length is appended to further reduce collision odds.
+function agentMsgDedupKey(dest: string, body: string): string {
+  let h = 5381
+  for (let i = 0; i < body.length; i++) h = (Math.imul(h, 33) ^ body.charCodeAt(i)) >>> 0
+  return `${dest}::${h.toString(36)}:${body.length}`
+}
 // Destination is considered busy if its PTY produced output within this window
 const AGENT_MSG_BUSY_MS = 3000
 
@@ -97,6 +108,9 @@ function deliverAgentMsg(msg: AgentMsg) {
 //   [[SEND: <tab> :: <body>]]   (closing ]] optional)
 //   SEND: <tab> :: <body>       (case-insensitive, spaces optional)
 //   send:<tab>::<body>
+//   send:<tab> <body>           (no "::" — dest is a single token after the colon)
+// The "send:" prefix (with colon) is required for the space-separated form so that
+// ordinary input like "send git diff" is never intercepted.
 // Returns null when the line is not a send command.
 function parseUserSendCommand(line: string): { dest: string; body: string } | null {
   // Full form: [[SEND: dest :: body]] — closing brackets optional for forgiving input
@@ -105,6 +119,10 @@ function parseUserSendCommand(line: string): { dest: string; body: string } | nu
     // Bare form: send:dest::body / SEND: dest :: body
     m = line.match(/^SEND\s*:\s*(.+?)\s*::\s*([\s\S]+?)\s*$/i)
   }
+  if (!m) {
+    // Space-separated form: send:dest body (dest = single token, no "::" required)
+    m = line.match(/^SEND\s*:\s*(\S+)\s+([\s\S]+?)\s*$/i)
+  }
   if (!m) return null
   const dest = m[1].trim()
   const body = m[2].trim()
@@ -112,17 +130,30 @@ function parseUserSendCommand(line: string): { dest: string; body: string } | nu
   return { dest, body }
 }
 
-// Handle a detected [[SEND: dest :: body]] from tab `fromTabId`
-function handleAgentSend(fromTabId: string, destName: string, body: string) {
+// Handle a detected [[SEND: dest :: body]] from tab `fromTabId`.
+// bypassDedup: the user-typed interception path (parseUserSendCommand) never reaches the
+// PTY output stream, so it can't be re-detected by redraws — and a user re-typing the
+// same text clearly intends a re-send. Output-side detection always goes through dedup.
+function handleAgentSend(fromTabId: string, destName: string, body: string, opts?: { bypassDedup?: boolean }) {
   const now = Date.now()
-  const key = `${destName}::${body}`
-  const last = sentAgentMsgKeys.get(key) ?? 0
-  if (now - last < AGENT_MSG_DEDUP_MS) return
-  sentAgentMsgKeys.set(key, now)
-  // GC stale dedup keys
-  if (sentAgentMsgKeys.size > 200) {
-    for (const [k, t] of sentAgentMsgKeys) {
-      if (now - t > AGENT_MSG_DEDUP_MS) sentAgentMsgKeys.delete(k)
+  if (!opts?.bypassDedup) {
+    let keys = tabSentAgentMsgKeys.get(fromTabId)
+    if (!keys) {
+      keys = new Set<string>()
+      tabSentAgentMsgKeys.set(fromTabId, keys)
+    }
+    const key = agentMsgDedupKey(destName, body)
+    if (keys.has(key)) {
+      // Refresh LRU position so messages that keep reappearing in redraws stay blocked
+      keys.delete(key)
+      keys.add(key)
+      return
+    }
+    keys.add(key)
+    // LRU cap: evict oldest keys to bound memory per tab
+    while (keys.size > AGENT_MSG_DEDUP_MAX_PER_TAB) {
+      const oldest = keys.values().next().value as string
+      keys.delete(oldest)
     }
   }
 
@@ -894,7 +925,7 @@ function createWindow() {
     tabTaskCooldown.clear()
     emittedTaskTitles.clear()
     agentMsgQueue.length = 0
-    sentAgentMsgKeys.clear()
+    tabSentAgentMsgKeys.clear()
     for (const t of tabResumeWatch.values()) clearTimeout(t)
     tabResumeWatch.clear()
     for (const w of tabSessionWatchers.values()) clearInterval(w)
@@ -946,6 +977,7 @@ function createWindow() {
     tabLastOutputAt.delete(tabId)
     tabLastInputAt.delete(tabId)
     tabTaskScanBuf.delete(tabId)
+    tabSentAgentMsgKeys.delete(tabId)
     const sw = tabSessionWatchers.get(tabId)
     if (sw) { clearInterval(sw); tabSessionWatchers.delete(tabId) }
     const idx = tabOrder.indexOf(tabId)
@@ -1008,7 +1040,9 @@ function createWindow() {
         mainWindow?.webContents.send('agent-msg:notify', {
           type: 'queued', from: fromName, dest: send.dest, body: send.body,
         })
-        handleAgentSend(tabId, send.dest, send.body)
+        // User-typed sends bypass dedup: explicit re-sends of the same text are intentional,
+        // and this path never echoes into PTY output so redraw multi-delivery can't happen.
+        handleAgentSend(tabId, send.dest, send.body, { bypassDedup: true })
         return // do NOT forward this input to the PTY
       }
     }
