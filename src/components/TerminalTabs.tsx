@@ -505,7 +505,10 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         if (panes[1] !== null) {
           onCloseRightPane()
         } else {
-          const candidate = tabsRef.current.find((t) => t.id !== activeTabId)
+          // Pair the active tab with its neighbor (next, else previous) —
+          // with 3+ tabs, "first tab in the list" was unpredictable
+          const idx = tabsRef.current.findIndex((t) => t.id === activeTabId)
+          const candidate = tabsRef.current[idx + 1] ?? tabsRef.current[idx - 1]
           if (candidate) onOpenInRightPane(candidate.id)
         }
         return
@@ -700,18 +703,27 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         )}
       </div>
       {ctxMenu && (() => {
-        const isLeftPaneTab = ctxMenu.tabId === panes[0]
-        const isRightPaneTab = ctxMenu.tabId === panes[1]
+        const splitActive = panes[1] !== null
+        const isPaneTab = ctxMenu.tabId === panes[0] || (splitActive && ctxMenu.tabId === panes[1])
+        // Tab to send to the right pane. Right-clicking the active (=left pane) tab in
+        // single view previously hid the split item entirely — the cause of
+        // 「一度ペアを解除すると再度ペアが組めなくなる」. Now it pairs with its neighbor.
+        const splitTarget = (() => {
+          if (ctxMenu.tabId !== panes[0]) return ctxMenu.tabId
+          const idx = tabs.findIndex((t) => t.id === ctxMenu.tabId)
+          const neighbor = tabs[idx + 1] ?? tabs[idx - 1]
+          return neighbor ? neighbor.id : null
+        })()
         return (
           <div
             className="tab-context-menu"
             style={{ left: ctxMenu.x, top: ctxMenu.y }}
           >
-            {!isLeftPaneTab && !isRightPaneTab && (
+            {!(splitActive && isPaneTab) && tabs.length > 1 && splitTarget !== null && (
               <button
                 className="tab-agent-item"
                 onClick={() => {
-                  onOpenInRightPane(ctxMenu.tabId)
+                  onOpenInRightPane(splitTarget)
                   setCtxMenu(null)
                 }}
               >

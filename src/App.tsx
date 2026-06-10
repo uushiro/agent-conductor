@@ -17,6 +17,8 @@ export function App() {
   const [focusedPane, setFocusedPane] = useState<0 | 1>(0)
   const focusedPaneRef = useRef(focusedPane)
   focusedPaneRef.current = focusedPane
+  const panesRef = useRef(panes)
+  panesRef.current = panes
   const activeTabId = focusedPane === 1 && panes[1] !== null ? panes[1] : panes[0]
   const [showQuitConfirm, setShowQuitConfirm] = useState(false)
   const [showFloatingInput, setShowFloatingInput] = useState(
@@ -96,10 +98,10 @@ export function App() {
 
   // Open a tab in the right pane (split view)
   const openInRightPane = useCallback((tabId: string) => {
-    setPanes((prev) => {
-      if (prev[0] === tabId) return prev // same tab cannot occupy both panes
-      return [prev[0], tabId]
-    })
+    // Same tab cannot occupy both panes — and must not leave focusedPane pointing
+    // at a null pane (previously this set focusedPane=1 even when bailing out)
+    if (panesRef.current[0] === tabId) return
+    setPanes((prev) => (prev[0] === tabId ? prev : [prev[0], tabId]))
     setFocusedPane(1)
   }, [])
 
