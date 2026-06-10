@@ -96,13 +96,34 @@ export function App() {
     })
   }, [])
 
-  // Open a tab in the right pane (split view)
-  const openInRightPane = useCallback((tabId: string) => {
-    // Same tab cannot occupy both panes — and must not leave focusedPane pointing
-    // at a null pane (previously this set focusedPane=1 even when bailing out)
-    if (panesRef.current[0] === tabId) return
-    setPanes((prev) => (prev[0] === tabId ? prev : [prev[0], tabId]))
-    setFocusedPane(1)
+  // Add a tab to the split view (Chrome-style「新しい分割ビューにタブを追加」):
+  // - already shown in a pane → just focus that pane
+  // - single view → show it next to the current tab (right pane)
+  // - split view → it replaces the partner of the focused pane
+  const addToSplit = useCallback((tabId: string) => {
+    const [left, right] = panesRef.current
+    if (tabId === left || tabId === right) {
+      setFocusedPane(tabId === left ? 0 : 1)
+      return
+    }
+    if (right === null || focusedPaneRef.current === 0) {
+      setPanes([left, tabId])
+      setFocusedPane(1)
+    } else {
+      setPanes([tabId, right])
+      setFocusedPane(0)
+    }
+  }, [])
+
+  // Remove a tab from the split view (Chrome-style「分割ビューから削除」):
+  // the other pane's tab remains shown alone
+  const removeFromSplit = useCallback((tabId: string) => {
+    const [left, right] = panesRef.current
+    if (right === null) return
+    if (tabId === left) setPanes([right, null])
+    else if (tabId === right) setPanes([left, null])
+    else return
+    setFocusedPane(0)
   }, [])
 
   // Close the right pane (back to single view)
@@ -207,7 +228,8 @@ export function App() {
             panes={panes}
             focusedPane={focusedPane}
             onActiveTabChange={selectTab}
-            onOpenInRightPane={openInRightPane}
+            onAddToSplit={addToSplit}
+            onRemoveFromSplit={removeFromSplit}
             onCloseRightPane={closeRightPane}
             onTabRemoved={handleTabRemoved}
           />

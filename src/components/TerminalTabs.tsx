@@ -29,12 +29,13 @@ interface Props {
   panes: [string, string | null]
   focusedPane: 0 | 1
   onActiveTabChange: (tabId: string) => void
-  onOpenInRightPane: (tabId: string) => void
+  onAddToSplit: (tabId: string) => void
+  onRemoveFromSplit: (tabId: string) => void
   onCloseRightPane: () => void
   onTabRemoved: (tabId: string, fallbackId: string) => void
 }
 
-export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function TerminalTabs({ activeTabId, panes, focusedPane, onActiveTabChange, onOpenInRightPane, onCloseRightPane, onTabRemoved }, ref) {
+export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function TerminalTabs({ activeTabId, panes, focusedPane, onActiveTabChange, onAddToSplit, onRemoveFromSplit, onCloseRightPane, onTabRemoved }, ref) {
   const { fontSize, defaultAgent } = useSettings()
   const { lang } = useLang()
   const t = strings[lang]
@@ -509,7 +510,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
           // with 3+ tabs, "first tab in the list" was unpredictable
           const idx = tabsRef.current.findIndex((t) => t.id === activeTabId)
           const candidate = tabsRef.current[idx + 1] ?? tabsRef.current[idx - 1]
-          if (candidate) onOpenInRightPane(candidate.id)
+          if (candidate) onAddToSplit(candidate.id)
         }
         return
       }
@@ -521,7 +522,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [activeTabId, onActiveTabChange, createTab, panes, onOpenInRightPane, onCloseRightPane])
+  }, [activeTabId, onActiveTabChange, createTab, panes, onAddToSplit, onCloseRightPane])
 
   if (tabs.length === 0) {
     return null
@@ -704,12 +705,13 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       </div>
       {ctxMenu && (() => {
         const splitActive = panes[1] !== null
-        const isPaneTab = ctxMenu.tabId === panes[0] || (splitActive && ctxMenu.tabId === panes[1])
-        // Tab to send to the right pane. Right-clicking the active (=left pane) tab in
-        // single view previously hid the split item entirely — the cause of
-        // 「一度ペアを解除すると再度ペアが組めなくなる」. Now it pairs with its neighbor.
+        const inSplit = splitActive && (ctxMenu.tabId === panes[0] || ctxMenu.tabId === panes[1])
+        // Chrome準拠:「新しい分割ビューにタブを追加」は右クリックしたタブを
+        // 現在のアクティブタブと並べて表示する。アクティブタブ自身を右クリック
+        // した場合は隣のタブ（次→前）をペアにする（単一表示時 panes[0] = アクティブタブ）。
         const splitTarget = (() => {
-          if (ctxMenu.tabId !== panes[0]) return ctxMenu.tabId
+          if (inSplit) return null
+          if (splitActive || ctxMenu.tabId !== panes[0]) return ctxMenu.tabId
           const idx = tabs.findIndex((t) => t.id === ctxMenu.tabId)
           const neighbor = tabs[idx + 1] ?? tabs[idx - 1]
           return neighbor ? neighbor.id : null
@@ -719,27 +721,28 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
             className="tab-context-menu"
             style={{ left: ctxMenu.x, top: ctxMenu.y }}
           >
-            {!(splitActive && isPaneTab) && tabs.length > 1 && splitTarget !== null && (
+            {inSplit ? (
               <button
                 className="tab-agent-item"
                 onClick={() => {
-                  onOpenInRightPane(splitTarget)
+                  onRemoveFromSplit(ctxMenu.tabId)
                   setCtxMenu(null)
                 }}
               >
-                右ペインで開く
+                分割ビューから削除
               </button>
-            )}
-            {panes[1] !== null && (
-              <button
-                className="tab-agent-item"
-                onClick={() => {
-                  onCloseRightPane()
-                  setCtxMenu(null)
-                }}
-              >
-                分割を解除
-              </button>
+            ) : (
+              tabs.length > 1 && splitTarget !== null && (
+                <button
+                  className="tab-agent-item"
+                  onClick={() => {
+                    onAddToSplit(splitTarget)
+                    setCtxMenu(null)
+                  }}
+                >
+                  新しい分割ビューにタブを追加
+                </button>
+              )
             )}
             <button
               className="tab-agent-item"
