@@ -22,7 +22,13 @@ export function App() {
   // Remembered split pair (Chrome-style). `panes` is what is currently displayed;
   // the pair survives while a non-pair tab is shown solo, so clicking a pair tab
   // restores the split. Cleared by removeFromSplit / closeRightPane / closing a pair tab.
+  // State drives the tab-bar capsule rendering; the ref gives callbacks a current view.
+  const [splitPair, setSplitPair] = useState<[string, string] | null>(null)
   const splitPairRef = useRef<[string, string] | null>(null)
+  const updateSplitPair = useCallback((pair: [string, string] | null) => {
+    splitPairRef.current = pair
+    setSplitPair(pair)
+  }, [])
   const activeTabId = focusedPane === 1 && panes[1] !== null ? panes[1] : panes[0]
   const [showQuitConfirm, setShowQuitConfirm] = useState(false)
   const [showFloatingInput, setShowFloatingInput] = useState(
@@ -108,15 +114,15 @@ export function App() {
       return
     }
     if (right === null || focusedPaneRef.current === 0) {
-      splitPairRef.current = [left, tabId]
+      updateSplitPair([left, tabId])
       setPanes([left, tabId])
       setFocusedPane(1)
     } else {
-      splitPairRef.current = [tabId, right]
+      updateSplitPair([tabId, right])
       setPanes([tabId, right])
       setFocusedPane(0)
     }
-  }, [])
+  }, [updateSplitPair])
 
   // Remove a tab from the split view (Chrome-style「分割ビューから削除」):
   // the other pane's tab remains shown alone. The pair memory is dissolved.
@@ -126,23 +132,23 @@ export function App() {
     if (tabId === left) setPanes([right, null])
     else if (tabId === right) setPanes([left, null])
     else return
-    splitPairRef.current = null
+    updateSplitPair(null)
     setFocusedPane(0)
-  }, [])
+  }, [updateSplitPair])
 
   // Close the right pane (back to single view). The pair memory is dissolved.
   const closeRightPane = useCallback(() => {
-    splitPairRef.current = null
+    updateSplitPair(null)
     setPanes((prev) => (prev[1] === null ? prev : [prev[0], null]))
     setFocusedPane(0)
-  }, [])
+  }, [updateSplitPair])
 
   // A tab was closed: repair pane assignments (fallbackId = neighbor tab chosen by TerminalTabs)
   const handleTabRemoved = useCallback((tabId: string, fallbackId: string) => {
     const pair = splitPairRef.current
     if (pair && (pair[0] === tabId || pair[1] === tabId)) {
       // A pair member was closed → dissolve the pair memory
-      splitPairRef.current = null
+      updateSplitPair(null)
     }
     setPanes((prev) => {
       let [left, right] = prev
@@ -163,7 +169,7 @@ export function App() {
       if (left === prev[0] && right === prev[1]) return prev
       return [left, right]
     })
-  }, [])
+  }, [updateSplitPair])
 
   const handleSidebarResize = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -236,6 +242,7 @@ export function App() {
             ref={tabsRef}
             activeTabId={activeTabId}
             panes={panes}
+            splitPair={splitPair}
             focusedPane={focusedPane}
             onActiveTabChange={selectTab}
             onAddToSplit={addToSplit}

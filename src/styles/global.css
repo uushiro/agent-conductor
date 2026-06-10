@@ -827,6 +827,29 @@ html, body, #root {
   background: var(--bg-tertiary);
 }
 
+/* Chrome-style split-pair capsule: the two paired tabs share one rounded frame */
+.tab-capsule {
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  margin-top: 3px;
+  border: 1px solid var(--accent);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+
+.tab-capsule .tab {
+  margin-top: 0;
+  border-radius: 4px 4px 0 0;
+}
+
+/* Thin divider between the paired tabs (Chrome-like) */
+.tab-capsule .tab + .tab {
+  border-left: 1px solid var(--border);
+}
+
 /* Tab right-click context menu */
 .tab-context-menu {
   position: fixed;

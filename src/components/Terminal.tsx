@@ -156,6 +156,7 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
   return (
     <div
       ref={containerRef}
+      data-tab-id={tabId}
       className={`terminal-container${focused ? ' terminal-container--focused' : ''}`}
       style={{ display: visible ? undefined : 'none', ...paneStyle }}
       onMouseDown={onFocusRequest}

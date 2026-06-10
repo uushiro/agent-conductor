@@ -27,6 +27,7 @@ interface ClosedEntry {
 interface Props {
   activeTabId: string
   panes: [string, string | null]
+  splitPair: [string, string] | null
   focusedPane: 0 | 1
   onActiveTabChange: (tabId: string) => void
   onAddToSplit: (tabId: string) => void
@@ -35,7 +36,7 @@ interface Props {
   onTabRemoved: (tabId: string, fallbackId: string) => void
 }
 
-export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function TerminalTabs({ activeTabId, panes, focusedPane, onActiveTabChange, onAddToSplit, onRemoveFromSplit, onCloseRightPane, onTabRemoved }, ref) {
+export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function TerminalTabs({ activeTabId, panes, splitPair, focusedPane, onActiveTabChange, onAddToSplit, onRemoveFromSplit, onCloseRightPane, onTabRemoved }, ref) {
   const { fontSize, defaultAgent } = useSettings()
   const { lang } = useLang()
   const t = strings[lang]
@@ -205,6 +206,22 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
   useEffect(() => {
     localStorage.setItem('pane-split-ratio', String(splitRatio))
   }, [splitRatio])
+
+  // Capsule adjacency (Chrome-style): keep the split pair's tabs next to each
+  // other in the tab bar (pair[0] = left pane on the left). Runs on pair
+  // formation AND on any tabs change, so a drag-drop that would land between
+  // the pair self-heals back to adjacency.
+  useEffect(() => {
+    if (!splitPair) return
+    const i0 = tabs.findIndex((t) => t.id === splitPair[0])
+    const i1 = tabs.findIndex((t) => t.id === splitPair[1])
+    if (i0 === -1 || i1 === -1 || i1 === i0 + 1) return
+    const moved = tabs[i1]
+    const next = tabs.filter((t) => t.id !== splitPair[1])
+    next.splice(next.findIndex((t) => t.id === splitPair[0]) + 1, 0, moved)
+    window.electronAPI.reorderTerminals(next.map((t) => t.id))
+    setTabs(next)
+  }, [splitPair, tabs])
 
   // Close context menu when clicking outside / pressing Escape
   useEffect(() => {
@@ -380,6 +397,10 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
 
   const handleTabMouseDown = useCallback((e: React.MouseEvent, idx: number) => {
     if (editingTabId || e.button !== 0) return
+    // Capsule tabs are not draggable (minimal Chrome-style integration:
+    // the pair always stays adjacent, so reordering them is disabled)
+    const tabId = tabsRef.current[idx]?.id
+    if (splitPair && (tabId === splitPair[0] || tabId === splitPair[1])) return
     const startX = e.clientX
     let started = false
 
@@ -423,7 +444,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
 
     window.addEventListener('mousemove', onMouseMove)
     window.addEventListener('mouseup', onMouseUp)
-  }, [editingTabId])
+  }, [editingTabId, splitPair])
 
   const startEditing = (tabId: string, currentIssue: string) => {
     setEditingTabId(tabId)
@@ -528,56 +549,77 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     return null
   }
 
+  const renderTab = (tab: Tab, idx: number) => (
+    <div
+      key={tab.id}
+      data-tab-idx={idx}
+      data-tab-id={tab.id}
+      className={`tab ${tab.id === activeTabId ? 'tab-active' : ''} ${tab.id !== activeTabId && (tab.id === panes[0] || tab.id === panes[1]) ? 'tab-in-pane' : ''} ${tab.issue ? 'tab-two-line' : ''} ${dragOverIdx === idx && dragSrcIdxState !== idx ? 'tab-drag-over' : ''} ${dragSrcIdxState === idx ? 'tab-dragging' : ''}`}
+      onMouseDown={(e) => handleTabMouseDown(e, idx)}
+      onClick={() => onActiveTabChange(tab.id)}
+      onDoubleClick={() => startEditing(tab.id, tab.issue)}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        setCtxMenu({ x: e.clientX, y: e.clientY, tabId: tab.id })
+      }}
+    >
+      {editingTabId === tab.id ? (
+        <input
+          ref={editInputRef}
+          className="tab-rename-input"
+          value={editValue}
+          placeholder="Issue name..."
+          onChange={(e) => setEditValue(e.target.value)}
+          onBlur={commitRename}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commitRename()
+            if (e.key === 'Escape') cancelEditing()
+          }}
+          onClick={(e) => e.stopPropagation()}
+        />
+      ) : (
+        <div className="tab-labels">
+          {tab.issue && <span className="tab-issue">{tab.issue}</span>}
+          <span className={`tab-detail ${tab.resuming ? 'tab-detail-resuming' : ''}`}>{tab.detail}</span>
+        </div>
+      )}
+      {tabs.length > 1 && editingTabId !== tab.id && (
+        <button
+          className="tab-close"
+          onClick={(e) => {
+            e.stopPropagation()
+            closeTab(tab.id)
+          }}
+        >
+          ×
+        </button>
+      )}
+    </div>
+  )
+
   return (
     <div className="terminal-panel">
       <div className="tab-bar">
         <div className="tab-bar-tabs">
-          {tabs.map((tab, idx) => (
-            <div
-              key={tab.id}
-              data-tab-idx={idx}
-              className={`tab ${tab.id === activeTabId ? 'tab-active' : ''} ${tab.id !== activeTabId && (tab.id === panes[0] || tab.id === panes[1]) ? 'tab-in-pane' : ''} ${tab.issue ? 'tab-two-line' : ''} ${dragOverIdx === idx && dragSrcIdxState !== idx ? 'tab-drag-over' : ''} ${dragSrcIdxState === idx ? 'tab-dragging' : ''}`}
-              onMouseDown={(e) => handleTabMouseDown(e, idx)}
-              onClick={() => onActiveTabChange(tab.id)}
-              onDoubleClick={() => startEditing(tab.id, tab.issue)}
-              onContextMenu={(e) => {
-                e.preventDefault()
-                setCtxMenu({ x: e.clientX, y: e.clientY, tabId: tab.id })
-              }}
-            >
-              {editingTabId === tab.id ? (
-                <input
-                  ref={editInputRef}
-                  className="tab-rename-input"
-                  value={editValue}
-                  placeholder="Issue name..."
-                  onChange={(e) => setEditValue(e.target.value)}
-                  onBlur={commitRename}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') commitRename()
-                    if (e.key === 'Escape') cancelEditing()
-                  }}
-                  onClick={(e) => e.stopPropagation()}
-                />
-              ) : (
-                <div className="tab-labels">
-                  {tab.issue && <span className="tab-issue">{tab.issue}</span>}
-                  <span className={`tab-detail ${tab.resuming ? 'tab-detail-resuming' : ''}`}>{tab.detail}</span>
-                </div>
-              )}
-              {tabs.length > 1 && editingTabId !== tab.id && (
-                <button
-                  className="tab-close"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    closeTab(tab.id)
-                  }}
-                >
-                  ×
-                </button>
-              )}
-            </div>
-          ))}
+          {tabs.map((tab, idx) => {
+            // Chrome-style capsule: when the split pair is adjacent in the tab
+            // bar, wrap the two tabs in a single rounded frame. The capsule
+            // persists while a non-pair tab is shown solo (pair remembered).
+            if (splitPair) {
+              if (tab.id === splitPair[1] && tabs[idx - 1]?.id === splitPair[0]) {
+                return null // rendered inside the capsule below
+              }
+              if (tab.id === splitPair[0] && tabs[idx + 1]?.id === splitPair[1]) {
+                return (
+                  <div className="tab-capsule" key={`capsule-${splitPair[0]}`}>
+                    {renderTab(tab, idx)}
+                    {renderTab(tabs[idx + 1], idx + 1)}
+                  </div>
+                )
+              }
+            }
+            return renderTab(tab, idx)
+          })}
         </div>
         <div className="tab-bar-actions">
           <div className="tab-new-wrapper" ref={agentMenuRef}>
