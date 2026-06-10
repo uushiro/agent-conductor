@@ -499,8 +499,8 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         createTab()
         return
       }
-      // Cmd+\: toggle split view
-      if (e.key === '\\') {
+      // Cmd+\: toggle split view (JIS keyboards emit '¥' for the same physical key)
+      if (e.key === '\\' || e.key === '¥') {
         e.preventDefault()
         if (panes[1] !== null) {
           onCloseRightPane()
