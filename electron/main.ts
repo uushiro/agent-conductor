@@ -93,6 +93,25 @@ function deliverAgentMsg(msg: AgentMsg) {
   })
 }
 
+// Parse a user-typed send command (lenient variants accepted):
+//   [[SEND: <tab> :: <body>]]   (closing ]] optional)
+//   SEND: <tab> :: <body>       (case-insensitive, spaces optional)
+//   send:<tab>::<body>
+// Returns null when the line is not a send command.
+function parseUserSendCommand(line: string): { dest: string; body: string } | null {
+  // Full form: [[SEND: dest :: body]] — closing brackets optional for forgiving input
+  let m = line.match(/^\[\[\s*SEND\s*:\s*(.+?)\s*::\s*([\s\S]+?)\s*(?:\]\])?\s*$/i)
+  if (!m) {
+    // Bare form: send:dest::body / SEND: dest :: body
+    m = line.match(/^SEND\s*:\s*(.+?)\s*::\s*([\s\S]+?)\s*$/i)
+  }
+  if (!m) return null
+  const dest = m[1].trim()
+  const body = m[2].trim()
+  if (!dest || !body) return null
+  return { dest, body }
+}
+
 // Handle a detected [[SEND: dest :: body]] from tab `fromTabId`
 function handleAgentSend(fromTabId: string, destName: string, body: string) {
   const now = Date.now()
@@ -598,6 +617,9 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
     env: (() => {
       const env = { ...process.env } as Record<string, string>
       delete env.CLAUDECODE
+      // Let agents inside the tab know they run under Agent Conductor
+      // (enables [[SEND: <tab> :: <body>]] inter-tab messaging awareness)
+      env.AGENT_CONDUCTOR = '1'
       return env
     })(),
   })
@@ -963,6 +985,34 @@ function createWindow() {
   // Relay renderer input → pty, and capture prompts / detect claude launch
   ipcMain.on('terminal:input', (_event: Electron.IpcMainEvent, tabId: string, data: string) => {
     const proc = ptyProcesses.get(tabId)
+
+    // Strip bracketed-paste markers for parsing only (PTY still receives raw data).
+    // This lets pasted text participate in input-line analysis below.
+    const parsed = data.replace(/\x1b\[20[01]~/g, '')
+    const isEnter = parsed === '\r' || (parsed.includes('\r') && parsed.length > 1)
+
+    // --- User-typed send command interception ---
+    // If the submitted line is a [[SEND:]] command (or lenient variant), route it
+    // directly instead of passing it to the in-tab agent.
+    if (proc && isEnter) {
+      const buffered = tabInputBuf.get(tabId) || ''
+      const batch = parsed !== '\r' ? parsed.split('\r')[0] : ''
+      const send = parseUserSendCommand((buffered + batch).trim())
+      if (send) {
+        tabInputBuf.set(tabId, '')
+        // Chars typed/pasted before Enter were already echoed into the tab's
+        // input line — erase them with backspaces (works in shells and agent TUIs)
+        if (buffered.length > 0) proc.write('\x7f'.repeat(Array.from(buffered).length))
+        const fromName = tabInfo.get(tabId)?.issue || tabId
+        console.log(`[agent-msg] ユーザー入力からSEND検出: ${fromName} → ${send.dest}`)
+        mainWindow?.webContents.send('agent-msg:notify', {
+          type: 'queued', from: fromName, dest: send.dest, body: send.body,
+        })
+        handleAgentSend(tabId, send.dest, send.body)
+        return // do NOT forward this input to the PTY
+      }
+    }
+
     if (proc) {
       proc.write(data)
     }
@@ -972,10 +1022,10 @@ function createWindow() {
 
     const isShell = !info.proc || SHELLS.has(info.proc)
 
-    if (data === '\r' || (data.includes('\r') && data.length > 1)) {
+    if (isEnter) {
       // Extract the command (handles both single '\r' and batch 'command\r')
       const buffered = tabInputBuf.get(tabId) || ''
-      const batchCmd = data.includes('\r') && data.length > 1 ? data.split('\r')[0] : ''
+      const batchCmd = parsed !== '\r' ? parsed.split('\r')[0] : ''
       const input = (buffered + batchCmd).trim()
       tabInputBuf.set(tabId, '')
 
@@ -1038,10 +1088,11 @@ function createWindow() {
       tabInputBuf.set(tabId, buf.slice(0, -1))
     } else if (data === '\x03' || data === '\x04') {
       tabInputBuf.set(tabId, '')
-    } else if (data.length === 1 && data.charCodeAt(0) >= 32) {
-      tabInputBuf.set(tabId, (tabInputBuf.get(tabId) || '') + data)
-    } else if (data.length > 1 && !data.startsWith('\x1b')) {
-      tabInputBuf.set(tabId, (tabInputBuf.get(tabId) || '') + data)
+    } else if (parsed.length === 1 && parsed.charCodeAt(0) >= 32) {
+      tabInputBuf.set(tabId, (tabInputBuf.get(tabId) || '') + parsed)
+    } else if (parsed.length > 1 && !parsed.startsWith('\x1b')) {
+      // Includes bracketed-paste content (markers stripped above)
+      tabInputBuf.set(tabId, (tabInputBuf.get(tabId) || '') + parsed)
     }
   })
 

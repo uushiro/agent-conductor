@@ -61,8 +61,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // Agent-to-agent message notifications ([[SEND: dest :: body]] routing results)
-  onAgentMsgNotify: (cb: (payload: { type: 'delivered' | 'error'; from: string; dest: string; body: string }) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, payload: { type: 'delivered' | 'error'; from: string; dest: string; body: string }) => cb(payload)
+  onAgentMsgNotify: (cb: (payload: { type: 'queued' | 'delivered' | 'error'; from: string; dest: string; body: string }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: { type: 'queued' | 'delivered' | 'error'; from: string; dest: string; body: string }) => cb(payload)
     ipcRenderer.on('agent-msg:notify', listener)
     return () => ipcRenderer.removeListener('agent-msg:notify', listener)
   },

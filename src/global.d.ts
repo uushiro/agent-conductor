@@ -47,7 +47,7 @@ export interface ElectronAPI {
   loadSession: () => Promise<SavedSession | null>
   onTaskAdd: (cb: (title: string) => void) => () => void
   onTaskSetAll: (cb: (tasksJson: string) => void) => () => void
-  onAgentMsgNotify: (cb: (payload: { type: 'delivered' | 'error'; from: string; dest: string; body: string }) => void) => () => void
+  onAgentMsgNotify: (cb: (payload: { type: 'queued' | 'delivered' | 'error'; from: string; dest: string; body: string }) => void) => () => void
   onQuitConfirm: (cb: () => void) => () => void
   onQuitConfirmCancel: (cb: () => void) => () => void
   getGitBranch: () => Promise<string | null>
