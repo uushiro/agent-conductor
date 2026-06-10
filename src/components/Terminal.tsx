@@ -1,15 +1,22 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type CSSProperties } from 'react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 
 interface TerminalProps {
   tabId: string
-  isActive: boolean
+  /** Shown in any pane (single view: the active tab) */
+  visible: boolean
+  /** This pane is the focused one (only meaningful in split view) */
+  focused: boolean
   fontSize: number
+  /** Pane geometry override (split view): e.g. { right: '50%' } / { left: '50%' } */
+  paneStyle?: CSSProperties
+  /** Called when the user interacts with this terminal (focus the pane) */
+  onFocusRequest?: () => void
 }
 
-export function Terminal({ tabId, isActive, fontSize }: TerminalProps) {
+export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocusRequest }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<XTerm | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
@@ -68,7 +75,8 @@ export function Terminal({ tabId, isActive, fontSize }: TerminalProps) {
         (ev.metaKey && ev.key >= '1' && ev.key <= '9') || // Cmd+1-9
         (ev.metaKey && ev.altKey && (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight')) || // Cmd+Option+←/→
         (ev.metaKey && ev.key === 'w') || // Cmd+W
-        (ev.metaKey && ev.key === 't') // Cmd+T
+        (ev.metaKey && ev.key === 't') || // Cmd+T
+        (ev.metaKey && ev.key === '\\') // Cmd+\ (split toggle)
       if (isTabSwitch) {
         return false // xtermに処理させず、元のイベントのバブリングでdocumentハンドラに届ける
       }
@@ -126,9 +134,9 @@ export function Terminal({ tabId, isActive, fontSize }: TerminalProps) {
     }
   }, [fontSize])
 
-  // Re-fit when becoming active (container may have resized while hidden)
+  // Re-fit when becoming visible (container may have resized while hidden)
   useEffect(() => {
-    if (isActive && fitAddonRef.current && terminalRef.current) {
+    if (visible && fitAddonRef.current && terminalRef.current) {
       // Small delay to ensure the container is visible before fitting
       const timer = setTimeout(() => {
         try {
@@ -143,13 +151,14 @@ export function Terminal({ tabId, isActive, fontSize }: TerminalProps) {
       }, 10)
       return () => clearTimeout(timer)
     }
-  }, [isActive, tabId])
+  }, [visible, tabId])
 
   return (
     <div
       ref={containerRef}
-      className="terminal-container"
-      style={{ display: isActive ? undefined : 'none' }}
+      className={`terminal-container${focused ? ' terminal-container--focused' : ''}`}
+      style={{ display: visible ? undefined : 'none', ...paneStyle }}
+      onMouseDown={onFocusRequest}
     />
   )
 }

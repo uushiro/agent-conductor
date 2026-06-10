@@ -11,7 +11,13 @@ import { FloatingInput } from './components/FloatingInput'
 export function App() {
   const { lang } = useLang()
   const { fileTreeVisible, updateSettings, loaded } = useSettings()
-  const [activeTabId, setActiveTabId] = useState<string>('')
+  // Split view: panes[0] = left pane tab, panes[1] = right pane tab (null = single pane)
+  const [panes, setPanes] = useState<[string, string | null]>(['', null])
+  // focusedPane: which pane "activeTabId" refers to (last-focused pane)
+  const [focusedPane, setFocusedPane] = useState<0 | 1>(0)
+  const focusedPaneRef = useRef(focusedPane)
+  focusedPaneRef.current = focusedPane
+  const activeTabId = focusedPane === 1 && panes[1] !== null ? panes[1] : panes[0]
   const [showQuitConfirm, setShowQuitConfirm] = useState(false)
   const [showFloatingInput, setShowFloatingInput] = useState(
     () => localStorage.getItem('input-bar-open') !== 'false'
@@ -70,6 +76,62 @@ export function App() {
     return () => document.removeEventListener('keydown', handler)
   }, [])
 
+  // Select a tab: show it in the focused pane (or focus the pane already showing it)
+  const selectTab = useCallback((tabId: string) => {
+    if (!tabId) return
+    setPanes((prev) => {
+      if (prev[0] === tabId) {
+        setFocusedPane(0)
+        return prev
+      }
+      if (prev[1] === tabId) {
+        setFocusedPane(1)
+        return prev
+      }
+      const target = focusedPaneRef.current === 1 && prev[1] !== null ? 1 : 0
+      setFocusedPane(target)
+      return target === 1 ? [prev[0], tabId] : [tabId, prev[1]]
+    })
+  }, [])
+
+  // Open a tab in the right pane (split view)
+  const openInRightPane = useCallback((tabId: string) => {
+    setPanes((prev) => {
+      if (prev[0] === tabId) return prev // same tab cannot occupy both panes
+      return [prev[0], tabId]
+    })
+    setFocusedPane(1)
+  }, [])
+
+  // Close the right pane (back to single view)
+  const closeRightPane = useCallback(() => {
+    setPanes((prev) => (prev[1] === null ? prev : [prev[0], null]))
+    setFocusedPane(0)
+  }, [])
+
+  // A tab was closed: repair pane assignments (fallbackId = neighbor tab chosen by TerminalTabs)
+  const handleTabRemoved = useCallback((tabId: string, fallbackId: string) => {
+    setPanes((prev) => {
+      let [left, right] = prev
+      if (right === tabId) {
+        right = null
+        setFocusedPane(0)
+      }
+      if (left === tabId) {
+        if (right !== null && fallbackId === right) {
+          // The only sensible fallback is the right-pane tab → promote it to left, unsplit
+          left = right
+          right = null
+        } else {
+          left = fallbackId
+        }
+        setFocusedPane(0)
+      }
+      if (left === prev[0] && right === prev[1]) return prev
+      return [left, right]
+    })
+  }, [])
+
   const handleSidebarResize = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     const startX = e.clientX
@@ -124,7 +186,7 @@ export function App() {
       <div className="main-content">
         <Sidebar
           activeTabId={activeTabId}
-          onTabSelect={setActiveTabId}
+          onTabSelect={selectTab}
           onSendToAgent={(prompt, agent) => tabsRef.current?.sendToNewTab(prompt, agent)}
           onResumeSession={(sessionId) => tabsRef.current?.resumeSession(sessionId)}
           fileTreeVisible={fileTreeVisible}
@@ -137,7 +199,16 @@ export function App() {
           <div className="resize-handle" onMouseDown={handleFileTreeResize} />
         )}
         <div className="terminal-column">
-          <TerminalTabs ref={tabsRef} activeTabId={activeTabId} onActiveTabChange={setActiveTabId} />
+          <TerminalTabs
+            ref={tabsRef}
+            activeTabId={activeTabId}
+            panes={panes}
+            focusedPane={focusedPane}
+            onActiveTabChange={selectTab}
+            onOpenInRightPane={openInRightPane}
+            onCloseRightPane={closeRightPane}
+            onTabRemoved={handleTabRemoved}
+          />
           <div style={{
             height: showFloatingInput ? inputBarHeight : 0,
             overflow: 'hidden',

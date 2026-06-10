@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from 'react'
+import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle, type CSSProperties } from 'react'
 import { Terminal } from './Terminal'
 import { useSettings } from '../contexts/SettingsContext'
 import { useLang, strings } from '../contexts/LangContext'
@@ -26,10 +26,15 @@ interface ClosedEntry {
 
 interface Props {
   activeTabId: string
+  panes: [string, string | null]
+  focusedPane: 0 | 1
   onActiveTabChange: (tabId: string) => void
+  onOpenInRightPane: (tabId: string) => void
+  onCloseRightPane: () => void
+  onTabRemoved: (tabId: string, fallbackId: string) => void
 }
 
-export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function TerminalTabs({ activeTabId, onActiveTabChange }, ref) {
+export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function TerminalTabs({ activeTabId, panes, focusedPane, onActiveTabChange, onOpenInRightPane, onCloseRightPane, onTabRemoved }, ref) {
   const { fontSize, defaultAgent } = useSettings()
   const { lang } = useLang()
   const t = strings[lang]
@@ -42,6 +47,16 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
   const [showAgentMenu, setShowAgentMenu] = useState(false)
   const [dragOverIdx, setDragOverIdx] = useState<number>(-1)
   const [dragSrcIdxState, setDragSrcIdxState] = useState<number>(-1)
+  // Split view: pane divider position (% width of the left pane)
+  const [splitRatio, setSplitRatio] = useState(() => {
+    const saved = Number(localStorage.getItem('pane-split-ratio'))
+    return saved >= 20 && saved <= 80 ? saved : 50
+  })
+  const splitRatioRef = useRef(splitRatio)
+  splitRatioRef.current = splitRatio
+  // Tab context menu (right-click)
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; tabId: string } | null>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
   const dragSrcIdx = useRef<number>(-1)
   const dragOverIdxRef = useRef<number>(-1)
   const editInputRef = useRef<HTMLInputElement>(null)
@@ -185,6 +200,48 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     return () => document.removeEventListener('mousedown', handler)
   }, [showRestoreMenu])
 
+  // Persist split ratio
+  useEffect(() => {
+    localStorage.setItem('pane-split-ratio', String(splitRatio))
+  }, [splitRatio])
+
+  // Close context menu when clicking outside / pressing Escape
+  useEffect(() => {
+    if (!ctxMenu) return
+    const onMouseDown = (e: MouseEvent) => {
+      const el = e.target as HTMLElement
+      if (!el.closest('.tab-context-menu')) setCtxMenu(null)
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCtxMenu(null)
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [ctxMenu])
+
+  // Pane divider drag (split view resize)
+  const handlePaneResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    const rect = contentRef.current?.getBoundingClientRect()
+    if (!rect || rect.width === 0) return
+    const onMove = (me: MouseEvent) => {
+      const ratio = ((me.clientX - rect.left) / rect.width) * 100
+      setSplitRatio(Math.max(20, Math.min(80, ratio)))
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      document.body.style.cursor = ''
+    }
+    document.body.style.cursor = 'col-resize'
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [])
+
   // Close agent menu when clicking outside
   useEffect(() => {
     if (!showAgentMenu) return
@@ -269,14 +326,13 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         const idx = prev.findIndex((t) => t.id === tabId)
         const updated = prev.filter((t) => t.id !== tabId)
         window.electronAPI.closeTerminal(tabId)
-        if (tabId === activeTabId) {
-          const newIdx = Math.min(idx, updated.length - 1)
-          onActiveTabChange(updated[newIdx].id)
-        }
+        // Let App repair pane assignments (handles active tab, split panes, etc.)
+        const fallback = updated[Math.min(idx, updated.length - 1)].id
+        onTabRemoved(tabId, fallback)
         return updated
       })
     },
-    [activeTabId, onActiveTabChange]
+    [onTabRemoved]
   )
   doCloseTabRef.current = doCloseTab
 
@@ -443,6 +499,17 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         createTab()
         return
       }
+      // Cmd+\: toggle split view
+      if (e.key === '\\') {
+        e.preventDefault()
+        if (panes[1] !== null) {
+          onCloseRightPane()
+        } else {
+          const candidate = tabsRef.current.find((t) => t.id !== activeTabId)
+          if (candidate) onOpenInRightPane(candidate.id)
+        }
+        return
+      }
       // Cmd+W: close active tab (with confirmation)
       if (e.key === 'w') {
         e.preventDefault()
@@ -451,7 +518,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [activeTabId, onActiveTabChange, createTab])
+  }, [activeTabId, onActiveTabChange, createTab, panes, onOpenInRightPane, onCloseRightPane])
 
   if (tabs.length === 0) {
     return null
@@ -465,10 +532,14 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
             <div
               key={tab.id}
               data-tab-idx={idx}
-              className={`tab ${tab.id === activeTabId ? 'tab-active' : ''} ${tab.issue ? 'tab-two-line' : ''} ${dragOverIdx === idx && dragSrcIdxState !== idx ? 'tab-drag-over' : ''} ${dragSrcIdxState === idx ? 'tab-dragging' : ''}`}
+              className={`tab ${tab.id === activeTabId ? 'tab-active' : ''} ${tab.id !== activeTabId && (tab.id === panes[0] || tab.id === panes[1]) ? 'tab-in-pane' : ''} ${tab.issue ? 'tab-two-line' : ''} ${dragOverIdx === idx && dragSrcIdxState !== idx ? 'tab-drag-over' : ''} ${dragSrcIdxState === idx ? 'tab-dragging' : ''}`}
               onMouseDown={(e) => handleTabMouseDown(e, idx)}
               onClick={() => onActiveTabChange(tab.id)}
               onDoubleClick={() => startEditing(tab.id, tab.issue)}
+              onContextMenu={(e) => {
+                e.preventDefault()
+                setCtxMenu({ x: e.clientX, y: e.clientY, tabId: tab.id })
+              }}
             >
               {editingTabId === tab.id ? (
                 <input
@@ -588,16 +659,99 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
           </button>
         </div>
       )}
-      <div className="terminal-tabs-content">
-        {tabs.map((tab) => (
-          <Terminal
-            key={tab.id}
-            tabId={tab.id}
-            isActive={tab.id === activeTabId}
-            fontSize={fontSize}
-          />
-        ))}
+      <div className="terminal-tabs-content" ref={contentRef}>
+        {tabs.map((tab) => {
+          const splitActive = panes[1] !== null
+          const pane: 0 | 1 | null =
+            tab.id === panes[0] ? 0 : splitActive && tab.id === panes[1] ? 1 : null
+          const paneStyle: CSSProperties | undefined =
+            splitActive && pane !== null
+              ? pane === 0
+                ? { right: `${100 - splitRatio}%` }
+                : { left: `${splitRatio}%` }
+              : undefined
+          return (
+            <Terminal
+              key={tab.id}
+              tabId={tab.id}
+              visible={pane !== null}
+              focused={splitActive && pane === focusedPane}
+              paneStyle={paneStyle}
+              fontSize={fontSize}
+              onFocusRequest={() => onActiveTabChange(tab.id)}
+            />
+          )
+        })}
+        {panes[1] !== null && (
+          <>
+            <div
+              className="pane-divider"
+              style={{ left: `calc(${splitRatio}% - 3px)` }}
+              onMouseDown={handlePaneResize}
+            />
+            <button
+              className="pane-close-btn"
+              title="右ペインを閉じる (⌘\)"
+              onClick={onCloseRightPane}
+            >
+              ×
+            </button>
+          </>
+        )}
       </div>
+      {ctxMenu && (() => {
+        const isLeftPaneTab = ctxMenu.tabId === panes[0]
+        const isRightPaneTab = ctxMenu.tabId === panes[1]
+        return (
+          <div
+            className="tab-context-menu"
+            style={{ left: ctxMenu.x, top: ctxMenu.y }}
+          >
+            {!isLeftPaneTab && !isRightPaneTab && (
+              <button
+                className="tab-agent-item"
+                onClick={() => {
+                  onOpenInRightPane(ctxMenu.tabId)
+                  setCtxMenu(null)
+                }}
+              >
+                右ペインで開く
+              </button>
+            )}
+            {panes[1] !== null && (
+              <button
+                className="tab-agent-item"
+                onClick={() => {
+                  onCloseRightPane()
+                  setCtxMenu(null)
+                }}
+              >
+                分割を解除
+              </button>
+            )}
+            <button
+              className="tab-agent-item"
+              onClick={() => {
+                startEditing(ctxMenu.tabId, tabsRef.current.find((t) => t.id === ctxMenu.tabId)?.issue || '')
+                setCtxMenu(null)
+              }}
+            >
+              名前を変更
+            </button>
+            {tabs.length > 1 && (
+              <button
+                className="tab-agent-item"
+                onClick={() => {
+                  closeTab(ctxMenu.tabId)
+                  setCtxMenu(null)
+                }}
+              >
+                タブを閉じる
+              </button>
+            )}
+          </div>
+        )
+      })()}
     </div>
   )
 })
