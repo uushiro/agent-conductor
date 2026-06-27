@@ -54,7 +54,8 @@ export interface ElectronAPI {
   getCwd: () => Promise<string>
   listDir: (dirPath: string) => Promise<FileEntry[]>
   openInEditor: (filePath: string, editorCommand?: string) => Promise<void>
-  writeClipboard: (text: string) => void
+  writeClipboard: (text: string) => Promise<void>
+  copyToClipboard: (text: string) => Promise<void>
   onUpdateAvailable: (cb: (version: string, url: string) => void) => () => void
   openExternal: (url: string) => void
   loadAppSettings: () => Promise<Record<string, unknown> | null>

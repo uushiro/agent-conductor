@@ -31,6 +31,7 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
         cursor: '#58a6ff',
         cursorAccent: '#0d1117',
         selectionBackground: '#264f78',
+        selectionInactiveBackground: '#264f78',
         black: '#484f58',
         red: '#ff7b72',
         green: '#3fb950',
@@ -53,6 +54,7 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
       cursorBlink: true,
       scrollback: 10000,
       allowProposedApi: true,
+      macOptionClickForcesSelection: true,
     })
 
     const fitAddon = new FitAddon()
@@ -60,6 +62,34 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
 
     term.open(containerRef.current)
     fitAddon.fit()
+
+    // .xterm-screen のキャプチャ段階で altKey=true の合成イベントを発火し
+    // xterm の shouldForceSelection(= altKey && macOptionClickForcesSelection) を通過させる
+    let synthesizing = false
+    const xtermScreen = containerRef.current.querySelector('.xterm-screen') as HTMLElement | null
+    const handleForceSelection = (e: MouseEvent) => {
+      if (e.button !== 0 || e.altKey || synthesizing) return
+      term.focus()
+      e.stopPropagation()  // PTY へのマウス報告を防ぐ
+      synthesizing = true
+      e.target?.dispatchEvent(new MouseEvent('mousedown', {
+        bubbles: true, cancelable: true, view: window,
+        clientX: e.clientX, clientY: e.clientY,
+        button: 0, buttons: 1, altKey: true,
+        detail: e.detail,
+      }))
+      synthesizing = false
+    }
+    if (xtermScreen) {
+      xtermScreen.addEventListener('mousedown', handleForceSelection, true)
+    }
+
+    // ドラッグ中に選択テキストをリアルタイムに保存
+    let lastSelText = ''
+    term.onSelectionChange(() => {
+      const s = term.getSelection()
+      if (s) lastSelText = s
+    })
 
     terminalRef.current = term
     fitAddonRef.current = fitAddon
@@ -119,9 +149,25 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
     })
     resizeObserver.observe(containerRef.current)
 
+    const handleMouseDown = () => term.focus()
+    const handleMouseUp = () => {
+      // document レベルの mouseup（xterm の finalize）完了後に実行
+      setTimeout(() => {
+        // getSelection() が残っていれば優先、なければ onSelectionChange で捕捉した値を使う
+        const sel = term.getSelection() || lastSelText
+        lastSelText = ''
+        if (sel) window.electronAPI.copyToClipboard(sel)
+      }, 0)
+    }
+    containerRef.current.addEventListener('mousedown', handleMouseDown)
+    containerRef.current.addEventListener('mouseup', handleMouseUp)
+
     return () => {
       removeDataListener()
       resizeObserver.disconnect()
+      containerRef.current?.removeEventListener('mousedown', handleMouseDown)
+      containerRef.current?.removeEventListener('mouseup', handleMouseUp)
+      if (xtermScreen) xtermScreen.removeEventListener('mousedown', handleForceSelection, true)
       term.dispose()
     }
   }, [tabId])
@@ -158,7 +204,7 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
       ref={containerRef}
       data-tab-id={tabId}
       className={`terminal-container${focused ? ' terminal-container--focused' : ''}`}
-      style={{ display: visible ? undefined : 'none', ...paneStyle }}
+      style={{ display: visible ? undefined : 'none', userSelect: 'none', WebkitUserSelect: 'none', ...paneStyle }}
       onMouseDown={onFocusRequest}
     />
   )

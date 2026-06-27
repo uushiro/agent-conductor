@@ -114,6 +114,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   writeClipboardImage: (filePath: string) => ipcRenderer.invoke('clipboard:write-image', filePath) as Promise<boolean>,
   saveClipboardImage: (filePath: string) => ipcRenderer.invoke('clipboard:save-image', filePath) as Promise<boolean>,
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
+  // Route through the main process via IPC. Calling clipboard.writeText()
+  // directly inside the sandboxed preload corrupts multi-byte UTF-8
+  // (ASCII ok / mixed garbled / CJK-only empty). Main runs it in full Node.
+  copyToClipboard: (text: string) => ipcRenderer.invoke('clipboard:write', text),
   pasteToWindow: () => ipcRenderer.invoke('window:paste'),
   listResumeSessions: (projectDirs: string[] | null) =>
     ipcRenderer.invoke('resume:list-sessions', projectDirs) as Promise<Array<{

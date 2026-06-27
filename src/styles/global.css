@@ -2102,3 +2102,9 @@ html, body, #root {
   background: var(--accent);
   opacity: 0.5;
 }
+
+/* xterm.css の user-select: text を上書きしてネイティブDOM選択を防ぐ */
+.terminal-container .xterm * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}

@@ -1230,7 +1230,14 @@ function createWindow() {
   })
 
   ipcMain.handle('clipboard:write', (_event, text: string) => {
-    clipboard.writeText(text)
+    if (process.platform === 'darwin') {
+      // __CF_USER_TEXT_ENCODING が Mac Japanese (Shift-JIS) の環境では
+      // clipboard.writeText / pbcopy がどちらも UTF-8 を Shift-JIS として書く。
+      // writeBuffer で UTI を明示して回避する。
+      clipboard.writeBuffer('public.utf8-plain-text', Buffer.from(text, 'utf8'))
+    } else {
+      clipboard.writeText(text)
+    }
   })
 
   ipcMain.handle('clipboard:write-image', (_event, filePath: string) => {
