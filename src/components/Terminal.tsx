@@ -70,7 +70,11 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
     const handleForceSelection = (e: MouseEvent) => {
       if (e.button !== 0 || e.altKey || synthesizing) return
       term.focus()
-      e.stopPropagation()  // PTY へのマウス報告を防ぐ
+      // PTYがマウスレポーティングを使っている場合はstopPropagationをスキップ
+      // (Claude Code TUIのタスクツリー等がクリックを受け取れるようにするため)
+      if (term.modes.mouseTrackingMode === 'none') {
+        e.stopPropagation()
+      }
       synthesizing = true
       e.target?.dispatchEvent(new MouseEvent('mousedown', {
         bubbles: true, cancelable: true, view: window,
