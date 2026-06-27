@@ -732,7 +732,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
               focused={splitActive && pane === focusedPane}
               paneStyle={paneStyle}
               fontSize={fontSize}
-              onFocusRequest={() => onActiveTabChange(tab.id)}
+              onFocusRequest={splitActive && pane !== focusedPane ? () => onActiveTabChange(tab.id) : undefined}
             />
           )
         })}
