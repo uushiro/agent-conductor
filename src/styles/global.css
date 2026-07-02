@@ -500,6 +500,123 @@ html, body, #root {
   font-style: italic;
 }
 
+/* Model badge on tabs (color dot + 1-letter abbreviation, e.g. F = Fable) */
+.tab-model-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.tab-model-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* In-tab worker agents ([[AGENT: label :: model :: started|done]] markers):
+   click area around the model badge + count overlay + popover list */
+.tab-agent-badge-area {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.tab-agent-count {
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--bg-primary);
+  background: var(--accent);
+  border-radius: 7px;
+  padding: 2px 4px;
+  margin-top: -8px;
+  flex-shrink: 0;
+}
+
+.tab-agent-popover {
+  /* Fixed like .tab-context-menu: escapes the .tab-bar-tabs scroll container.
+     left/top are set inline from the clicked tab's getBoundingClientRect(). */
+  position: fixed;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 180px;
+  max-width: 280px;
+  z-index: 200;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  padding: 4px 0;
+  cursor: default;
+}
+
+.tab-agent-popover-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 11px;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.tab-agent-popover-letter {
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.tab-agent-popover-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-agent-popover-status {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.tab-agent-popover-empty {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Model chips in the agent menu (launch claude with a specific model) */
+.tab-agent-models {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 4px;
+}
+
+.tab-model-chip {
+  background: none;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 3px 5px;
+  cursor: pointer;
+  opacity: 0.8;
+  transition: opacity 0.1s, background 0.1s;
+}
+
+.tab-model-chip:hover {
+  opacity: 1;
+  background: var(--bg-primary);
+}
+
 .tab-dragging {
   opacity: 0.4;
 }

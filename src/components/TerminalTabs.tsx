@@ -8,12 +8,21 @@ export interface TerminalTabsHandle {
   resumeSession: (sessionId: string) => void
 }
 
+// In-tab worker agent reported via [[AGENT: label :: model :: started|done]] markers
+interface ActiveAgent {
+  label: string
+  model: string
+  status: 'started' | 'done'
+}
+
 interface Tab {
   id: string
   issue: string
   detail: string
   customIssue: boolean
   resuming: boolean
+  model: string | null
+  activeAgents: ActiveAgent[]
 }
 
 interface ClosedEntry {
@@ -22,6 +31,25 @@ interface ClosedEntry {
   claudeSessionId: string | null
   agent: 'claude' | 'gemini' | 'codex'
   closedAt: number
+  model: string | null
+}
+
+// Claude model badge definitions (color dot + 1-letter abbreviation on tabs).
+// Detection is spawn-command based (main.ts parses --model from the launch args);
+// non-claude tabs and unknown models have model=null → no badge.
+type ClaudeModel = 'fable' | 'opus' | 'sonnet' | 'haiku'
+const CLAUDE_MODELS: Record<ClaudeModel, { letter: string; color: string; full: string }> = {
+  fable: { letter: 'F', color: '#a371f7', full: 'Fable 5' },
+  opus: { letter: 'O', color: '#d29922', full: 'Opus' },
+  sonnet: { letter: 'S', color: '#58a6ff', full: 'Sonnet' },
+  haiku: { letter: 'H', color: '#3fb950', full: 'Haiku' },
+}
+// Models offered in the "+" agent menu (opus is detected if launched manually, but not offered)
+const MENU_MODELS: ClaudeModel[] = ['fable', 'sonnet', 'haiku']
+
+function getModelBadge(model: string | null): { letter: string; color: string; full: string } | null {
+  if (!model) return null
+  return CLAUDE_MODELS[model as ClaudeModel] ?? null
 }
 
 interface Props {
@@ -59,6 +87,10 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
   splitRatioRef.current = splitRatio
   // Tab context menu (right-click)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; tabId: string } | null>(null)
+  // Popover listing in-tab worker agents (opened by clicking the model badge)
+  // Agent popover: anchored to the clicked tab (fixed coords computed on open,
+  // same pattern as .tab-context-menu). x/y = viewport position of the panel.
+  const [agentPopover, setAgentPopover] = useState<{ tabId: string; x: number; y: number } | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const dragSrcIdx = useRef<number>(-1)
   const dragOverIdxRef = useRef<number>(-1)
@@ -84,7 +116,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     const session = await window.electronAPI.loadSession()
     if (session && session.tabs.length > 0) {
       const restored: Tab[] = []
-      const claudeResumes: Array<{ tabId: string; sessionId: string | null }> = []
+      const claudeResumes: Array<{ tabId: string; sessionId: string | null; model: string | null }> = []
       const geminiResumes: Array<{ tabId: string }> = []
       const codexResumes: Array<{ tabId: string }> = []
       for (const saved of session.tabs) {
@@ -96,7 +128,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
           await window.electronAPI.setTerminalIssue(tabId, saved.issue)
         }
         if (saved.hadClaude) {
-          claudeResumes.push({ tabId, sessionId: saved.claudeSessionId })
+          claudeResumes.push({ tabId, sessionId: saved.claudeSessionId, model: saved.model ?? null })
         } else if (saved.hadGemini) {
           geminiResumes.push({ tabId })
         } else if (saved.hadCodex) {
@@ -109,6 +141,8 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
           detail: willResume ? 'Resuming...' : '',
           customIssue: !!saved.issue,
           resuming: willResume,
+          model: saved.hadClaude ? saved.model ?? null : null,
+          activeAgents: [],
         })
       }
       setTabs(restored)
@@ -116,9 +150,10 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       onActiveTabChange(restored[activeIdx]?.id || restored[0]?.id || '')
 
       // Auto-resume Claude tabs (3000ms stagger to prevent cross-tab session mixing)
-      claudeResumes.forEach(({ tabId, sessionId }, i) => {
+      claudeResumes.forEach(({ tabId, sessionId, model }, i) => {
         setTimeout(() => {
-          const cmd = sessionId ? `claude --resume ${sessionId}\r` : 'claude\r'
+          const modelFlag = model ? ` --model ${model}` : ''
+          const cmd = sessionId ? `claude${modelFlag} --resume ${sessionId}\r` : `claude${modelFlag}\r`
           window.electronAPI.sendTerminalInput(tabId, cmd)
         }, 1000 + i * 3000)
       })
@@ -155,15 +190,17 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       window.electronAPI.listTerminalInfo().then((infos) => {
         const resumingSet = new Set(infos.filter((i) => i.isResuming).map((i) => i.id))
         for (const tab of tabsRef.current) {
-          window.electronAPI.getTerminalTitle(tab.id).then(({ issue, detail }) => {
+          window.electronAPI.getTerminalTitle(tab.id).then(({ issue, detail, model, activeAgents }) => {
             setTabs((current) =>
               current.map((t) => {
                 if (t.id !== tab.id) return t
                 const stillResuming = resumingSet.has(t.id)
                 const newIssue = t.customIssue ? t.issue : issue
                 const newDetail = stillResuming ? 'Resuming...' : detail
-                if (newIssue === t.issue && newDetail === t.detail && stillResuming === t.resuming) return t
-                return { ...t, issue: newIssue, detail: newDetail, resuming: stillResuming }
+                const agents = activeAgents ?? []
+                const agentsChanged = JSON.stringify(agents) !== JSON.stringify(t.activeAgents)
+                if (newIssue === t.issue && newDetail === t.detail && stillResuming === t.resuming && model === t.model && !agentsChanged) return t
+                return { ...t, issue: newIssue, detail: newDetail, resuming: stillResuming, model, activeAgents: agents }
               })
             )
           })
@@ -242,6 +279,24 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     }
   }, [ctxMenu])
 
+  // Close agent popover when clicking outside / pressing Escape
+  useEffect(() => {
+    if (!agentPopover) return
+    const onMouseDown = (e: MouseEvent) => {
+      const el = e.target as HTMLElement
+      if (!el.closest('.tab-agent-badge-area')) setAgentPopover(null)
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setAgentPopover(null)
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [agentPopover])
+
   // Pane divider drag (split view resize)
   const handlePaneResize = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -298,16 +353,16 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     return () => document.removeEventListener('keydown', handler, true)
   }, [confirmClose])
 
-  const createTab = useCallback(async (agent: 'claude' | 'gemini' | 'codex' | 'terminal' = defaultAgent, initialPrompt?: string) => {
+  const createTab = useCallback(async (agent: 'claude' | 'gemini' | 'codex' | 'terminal' = defaultAgent, initialPrompt?: string, model?: ClaudeModel) => {
     const tabId = await window.electronAPI.createTerminal()
     setTabs((prev) => [
       ...prev,
-      { id: tabId, issue: '', detail: 'Terminal', customIssue: false, resuming: false },
+      { id: tabId, issue: '', detail: 'Terminal', customIssue: false, resuming: false, model: null, activeAgents: [] },
     ])
     onActiveTabChange(tabId)
     if (agent !== 'terminal') {
       setTimeout(() => {
-        const cmd = agent === 'gemini' ? 'gemini\r' : agent === 'codex' ? 'codex\r' : 'claude\r'
+        const cmd = agent === 'gemini' ? 'gemini\r' : agent === 'codex' ? 'codex\r' : model ? `claude --model ${model}\r` : 'claude\r'
         window.electronAPI.sendTerminalInput(tabId, cmd)
         if (initialPrompt) {
           // Wait for agent to initialize before sending the prompt
@@ -327,7 +382,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       const tabId = await window.electronAPI.createTerminal(undefined, sessionId)
       setTabs((prev) => [
         ...prev,
-        { id: tabId, issue: '', detail: 'Terminal', customIssue: false, resuming: true },
+        { id: tabId, issue: '', detail: 'Terminal', customIssue: false, resuming: true, model: null, activeAgents: [] },
       ])
       onActiveTabChange(tabId)
       setTimeout(() => {
@@ -381,15 +436,16 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       }
       setTabs((prev) => [
         ...prev,
-        { id: tabId, issue: entry.issue, detail: '', customIssue: !!entry.issue, resuming: false },
+        { id: tabId, issue: entry.issue, detail: '', customIssue: !!entry.issue, resuming: false, model: entry.agent === 'claude' ? entry.model : null, activeAgents: [] },
       ])
       onActiveTabChange(tabId)
       setTimeout(() => {
+        const modelFlag = entry.model ? ` --model ${entry.model}` : ''
         const cmd = entry.agent === 'gemini'
           ? 'gemini --resume latest\r'
           : entry.agent === 'codex'
           ? 'codex\r'
-          : entry.claudeSessionId ? `claude --resume ${entry.claudeSessionId}\r` : 'claude\r'
+          : entry.claudeSessionId ? `claude${modelFlag} --resume ${entry.claudeSessionId}\r` : `claude${modelFlag}\r`
         window.electronAPI.sendTerminalInput(tabId, cmd)
       }, 1000)
     },
@@ -591,6 +647,66 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
           <span className={`tab-detail ${tab.resuming ? 'tab-detail-resuming' : ''}`}>{tab.detail}</span>
         </div>
       )}
+      {editingTabId !== tab.id && (() => {
+        const badge = getModelBadge(tab.model)
+        const agents = tab.activeAgents
+        if (!badge && agents.length === 0) return null
+        const togglePopover = (e: React.MouseEvent) => {
+          e.stopPropagation()
+          // Anchor on the clicked tab element (not the tiny badge span): the
+          // panel juts out to the right of the tab, below the tab bar.
+          const tabEl = (e.currentTarget as HTMLElement).closest('.tab')
+          const rect = (tabEl ?? (e.currentTarget as HTMLElement)).getBoundingClientRect()
+          const POPOVER_WIDTH = 280 // matches .tab-agent-popover max-width
+          let x = rect.right + 6
+          if (x + POPOVER_WIDTH > window.innerWidth - 8) {
+            // Near the right edge: clamp back inside the viewport
+            x = Math.max(8, window.innerWidth - POPOVER_WIDTH - 8)
+          }
+          const y = rect.bottom + 6
+          setAgentPopover((cur) => (cur?.tabId === tab.id ? null : { tabId: tab.id, x, y }))
+        }
+        return (
+          <span className="tab-agent-badge-area" onClick={togglePopover}>
+            {badge && (
+              <span className="tab-model-badge" style={{ color: badge.color }} title={badge.full}>
+                <span className="tab-model-dot" style={{ background: badge.color }} />
+                {badge.letter}
+              </span>
+            )}
+            {agents.length > 0 && (
+              <span className="tab-agent-count" title={`並行稼働agent: ${agents.length}`}>
+                +{agents.length}
+              </span>
+            )}
+            {agentPopover?.tabId === tab.id && (
+              <div
+                className="tab-agent-popover"
+                style={{ left: agentPopover.x, top: agentPopover.y }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {agents.length === 0 ? (
+                  <div className="tab-agent-popover-empty">稼働中のagentなし</div>
+                ) : (
+                  agents.map((a) => {
+                    const ab = getModelBadge(a.model)
+                    return (
+                      <div key={a.label} className="tab-agent-popover-item">
+                        <span className="tab-model-dot" style={{ background: ab?.color ?? 'var(--text-muted)' }} />
+                        <span className="tab-agent-popover-letter" style={{ color: ab?.color ?? 'var(--text-muted)' }}>
+                          {ab?.letter ?? '?'}
+                        </span>
+                        <span className="tab-agent-popover-label">{a.label}</span>
+                        <span className="tab-agent-popover-status">{a.status === 'started' ? '実行中' : '完了'}</span>
+                      </div>
+                    )
+                  })
+                )}
+              </div>
+            )}
+          </span>
+        )
+      })()}
       {tabs.length > 1 && editingTabId !== tab.id && (
         <button
           className="tab-close"
@@ -647,6 +763,31 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
               return (
               <div className="tab-agent-menu">
                 {sorted.map(({ agent, icon, label }) => (
+                  agent === 'claude' ? (
+                    // Claude row: label launches with the CLI default model (no badge);
+                    // the model chips launch `claude --model <m>` (badge shown on the tab)
+                    <div
+                      key={agent}
+                      className={`tab-agent-item${agent === defaultAgent ? ' tab-agent-default' : ''}`}
+                      onClick={() => { createTab(agent); setShowAgentMenu(false) }}
+                    >
+                      <span className="agent-icon">{icon}</span>
+                      {label}
+                      <span className="tab-agent-models">
+                        {MENU_MODELS.map((m) => (
+                          <button
+                            key={m}
+                            className="tab-model-chip"
+                            style={{ color: CLAUDE_MODELS[m].color }}
+                            title={CLAUDE_MODELS[m].full}
+                            onClick={(e) => { e.stopPropagation(); createTab('claude', undefined, m); setShowAgentMenu(false) }}
+                          >
+                            {CLAUDE_MODELS[m].letter}
+                          </button>
+                        ))}
+                      </span>
+                    </div>
+                  ) : (
                   <button
                     key={agent}
                     className={`tab-agent-item${agent === defaultAgent ? ' tab-agent-default' : ''}`}
@@ -655,6 +796,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
                     <span className="agent-icon">{icon}</span>
                     {label}
                   </button>
+                  )
                 ))}
                 <button
                   className="tab-agent-item"

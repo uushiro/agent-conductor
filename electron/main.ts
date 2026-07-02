@@ -18,11 +18,29 @@ const SHELLS = new Set(['zsh', 'bash', 'fish', 'sh', 'login'])
 // Map of tabId → pty instance
 const ptyProcesses = new Map<string, ReturnType<typeof pty.spawn>>()
 const tabTimers = new Map<string, ReturnType<typeof setInterval>>()
+// In-tab worker agents reported via [[AGENT: label :: model :: started|done]] markers.
+// Runtime-only (not persisted to session.json) — cleared on tab close / app restart.
+interface ActiveAgent { label: string; model: string; status: 'started' | 'done' }
+
 const tabInfo = new Map<string, {
   cwd: string; proc: string; issue: string; latestInput: string
   claudeSessionId: string | null; claudeResumeParentId: string | null; hadClaude: boolean
   hadGemini: boolean; geminiSessionFile: string | null; hadCodex: boolean; resuming: boolean
+  model: string | null
+  activeAgents: ActiveAgent[]
 }>()
+
+// Normalize a --model argument to a known Claude model family (for the tab badge).
+// Detection is spawn-command based (machine-parsed from the launch args), NOT agent
+// self-reporting — unknown values return null and the badge is simply hidden.
+function normalizeClaudeModel(raw: string): string | null {
+  const s = raw.toLowerCase()
+  if (s.includes('fable')) return 'fable'
+  if (s.includes('opus')) return 'opus'
+  if (s.includes('sonnet')) return 'sonnet'
+  if (s.includes('haiku')) return 'haiku'
+  return null
+}
 
 interface ClosedTabEntry {
   issue: string
@@ -30,6 +48,7 @@ interface ClosedTabEntry {
   claudeSessionId: string | null
   agent: 'claude' | 'gemini' | 'codex'
   closedAt: number
+  model: string | null
 }
 const closedTabsHistory: ClosedTabEntry[] = []
 const tabInputBuf = new Map<string, string>()
@@ -47,6 +66,42 @@ const tabTaskScanBuf = new Map<string, string>()
 const emittedTaskTitles = new Set<string>()
 // tabId → timeout handle while watching for --resume failure ("No conversation found")
 const tabResumeWatch = new Map<string, ReturnType<typeof setTimeout>>()
+
+// --- In-tab worker agents ([[AGENT: label :: model :: started|done]]) ---
+// Dedup: TUI repaints (scroll/resize/turn-end) can re-emit the same marker, so each
+// exact marker (label::model::status) is processed once per tab. LRU-capped per tab.
+const tabAgentMarkerKeys = new Map<string, Set<string>>()
+const AGENT_MARKER_DEDUP_MAX_PER_TAB = 200
+
+// Handle a detected [[AGENT: label :: model :: status]] marker from tab `tabId`.
+// started → upsert into activeAgents (by label); done → remove the entry.
+function handleAgentMarker(tabId: string, label: string, model: string, status: 'started' | 'done') {
+  const key = `${label}::${model}::${status}`
+  let keys = tabAgentMarkerKeys.get(tabId)
+  if (!keys) { keys = new Set(); tabAgentMarkerKeys.set(tabId, keys) }
+  if (keys.has(key)) return
+  keys.add(key)
+  while (keys.size > AGENT_MARKER_DEDUP_MAX_PER_TAB) {
+    const oldest = keys.values().next().value as string
+    keys.delete(oldest)
+  }
+
+  const info = tabInfo.get(tabId)
+  if (!info) return
+  if (status === 'started') {
+    const normalized = normalizeClaudeModel(model) ?? model
+    const existing = info.activeAgents.find((a) => a.label === label)
+    if (existing) {
+      existing.model = normalized
+      existing.status = 'started'
+    } else {
+      info.activeAgents.push({ label, model: normalized, status: 'started' })
+    }
+  } else {
+    info.activeAgents = info.activeAgents.filter((a) => a.label !== label)
+  }
+  tabInfo.set(tabId, info)
+}
 
 // --- Agent-to-agent messaging ([[SEND: dest :: body]]) ---
 interface AgentMsg {
@@ -253,6 +308,7 @@ interface SavedTab {
   claudeSessionId: string | null
   hadGemini: boolean
   hadCodex: boolean
+  model: string | null
 }
 
 interface SavedSession {
@@ -327,6 +383,7 @@ function saveSession() {
         claudeSessionId,
         hadGemini: info.hadGemini,
         hadCodex: info.hadCodex,
+        model: info.model,
       })
     }
   }
@@ -622,7 +679,7 @@ function autoTitle(input: string): string {
 }
 
 function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
-  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGemini: false, geminiSessionFile: null as string | null, hadCodex: false, resuming: false }
+  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGemini: false, geminiSessionFile: null as string | null, hadCodex: false, resuming: false, model: null as string | null, activeAgents: [] as ActiveAgent[] }
   const prevProc = info.proc
 
   try {
@@ -645,6 +702,7 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
         info.hadClaude = false
         info.claudeSessionId = null
         info.claudeResumeParentId = null
+        info.model = null
       }
       if (prevProc === 'gemini') {
         info.hadGemini = false
@@ -683,7 +741,7 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
   })
 
   ptyProcesses.set(id, ptyProcess)
-  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null, hadCodex: false, resuming: false })
+  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null, hadCodex: false, resuming: false, model: null, activeAgents: [] })
   tabOrder.push(id)
 
   // Inject shell hook to emit OSC 7 on every prompt (cwd tracking without lsof).
@@ -741,6 +799,8 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
           info.claudeSessionId = null
           info.claudeResumeParentId = null
           info.hadClaude = true
+          // Fallback retries with plain `claude` (no --model) → model is unknown
+          info.model = null
           tabInfo.set(id, info)
         }
         // Wait for error to finish printing, then retry with plain claude
@@ -785,6 +845,13 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
         const dest = match[1].trim()
         const body = match[2].trim()
         if (dest && body) handleAgentSend(id, dest, body)
+        lastMatchEnd = Math.max(lastMatchEnd, match.index! + match[0].length)
+      }
+      // Detect [[AGENT: label :: model :: started|done]] pattern — in-tab worker tracking
+      for (const match of stripped.matchAll(/\[\[AGENT:\s*([^\]:]+?)\s*::\s*([^\]:]+?)\s*::\s*(started|done)\s*\]\]/g)) {
+        const label = match[1].trim()
+        const model = match[2].trim()
+        if (label && model) handleAgentMarker(id, label, model, match[3] as 'started' | 'done')
         lastMatchEnd = Math.max(lastMatchEnd, match.index! + match[0].length)
       }
       // Keep only the unmatched tail for split-chunk detection
@@ -842,8 +909,8 @@ function createWindow() {
   // Get title for a tab (poll from renderer)
   ipcMain.handle('terminal:get-title', (_event, tabId: string) => {
     const info = tabInfo.get(tabId)
-    if (!info) return { issue: '', detail: 'Terminal' }
-    const result = getTabTitle(info)
+    if (!info) return { issue: '', detail: 'Terminal', model: null, activeAgents: [] }
+    const result: { issue: string; detail: string; model: string | null; activeAgents: ActiveAgent[] } = { ...getTabTitle(info), model: info.model, activeAgents: info.activeAgents }
     // If detail fell back to directory name (latestInput is empty), try to populate
     // from session file so resumed tabs show last response instead of "~"
     if (result.detail === shortDir(info.cwd)) {
@@ -916,7 +983,7 @@ function createWindow() {
           lastOutput = extractLastLine(tabLastOutput.get(id) || '')
         }
 
-        if (!info) return { id, cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null, lastOutput: '', active, lastInputAt, isThinking: false, isResuming: false }
+        if (!info) return { id, cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null, lastOutput: '', active, lastInputAt, isThinking: false, isResuming: false, model: null, activeAgents: [] }
         return {
           id,
           cwd: info.cwd,
@@ -929,6 +996,8 @@ function createWindow() {
           lastInputAt,
           isThinking,
           isResuming: info.resuming,
+          model: info.model,
+          activeAgents: info.activeAgents,
         }
       })
       .sort((a, b) => b.lastInputAt - a.lastInputAt)
@@ -976,6 +1045,7 @@ function createWindow() {
         closedTabsHistory.unshift({
           issue: closingInfo.issue, cwd: closingInfo.cwd || HOME,
           claudeSessionId: sessionId, agent: 'claude', closedAt: Date.now(),
+          model: closingInfo.model,
         })
         if (closedTabsHistory.length > 10) closedTabsHistory.pop()
       }
@@ -985,6 +1055,7 @@ function createWindow() {
         closedTabsHistory.unshift({
           issue: closingInfo.issue, cwd: closingInfo.cwd || HOME,
           claudeSessionId: null, agent: 'gemini', closedAt: Date.now(),
+          model: null,
         })
         if (closedTabsHistory.length > 10) closedTabsHistory.pop()
       }
@@ -992,6 +1063,7 @@ function createWindow() {
       closedTabsHistory.unshift({
         issue: closingInfo.issue, cwd: closingInfo.cwd || HOME,
         claudeSessionId: null, agent: 'codex', closedAt: Date.now(),
+        model: null,
       })
       if (closedTabsHistory.length > 10) closedTabsHistory.pop()
     }
@@ -1005,6 +1077,7 @@ function createWindow() {
     tabLastInputAt.delete(tabId)
     tabTaskScanBuf.delete(tabId)
     tabSentAgentMsgKeys.delete(tabId)
+    tabAgentMarkerKeys.delete(tabId)
     const sw = tabSessionWatchers.get(tabId)
     if (sw) { clearInterval(sw); tabSessionWatchers.delete(tabId) }
     const idx = tabOrder.indexOf(tabId)
@@ -1110,6 +1183,10 @@ function createWindow() {
         // Detect "claude" command being launched from shell → snapshot NOW before file is created
         if (/^claude(\s|$)/.test(input)) {
           info.hadClaude = true
+          // Machine-detect the model from the launch args (--model sonnet / --model=sonnet).
+          // No flag or unknown value → null → no badge shown.
+          const modelMatch = input.match(/--model[=\s]+(\S+)/)
+          info.model = modelMatch ? normalizeClaudeModel(modelMatch[1]) : null
           // If resuming a specific session, save the ID directly
           const resumeMatch = input.match(/--resume\s+([a-f0-9-]{36})/)
           if (resumeMatch) {

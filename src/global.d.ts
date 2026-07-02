@@ -10,6 +10,14 @@ export interface ClosedTabEntry {
   claudeSessionId: string | null
   agent: 'claude' | 'gemini' | 'codex'
   closedAt: number
+  model: string | null
+}
+
+// In-tab worker agent reported via [[AGENT: label :: model :: started|done]] markers
+export interface ActiveAgent {
+  label: string
+  model: string
+  status: 'started' | 'done'
 }
 
 export interface TabInfo {
@@ -24,10 +32,12 @@ export interface TabInfo {
   lastInputAt: number
   isThinking: boolean
   isResuming: boolean
+  model: string | null
+  activeAgents: ActiveAgent[]
 }
 
 export interface SavedSession {
-  tabs: Array<{ issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null; hadGemini: boolean; hadCodex: boolean }>
+  tabs: Array<{ issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null; hadGemini: boolean; hadCodex: boolean; model: string | null }>
   activeIndex: number
 }
 
@@ -37,7 +47,7 @@ export interface ElectronAPI {
   onTerminalData: (callback: (tabId: string, data: string) => void) => () => void
   sendTerminalInput: (tabId: string, data: string) => void
   resizeTerminal: (tabId: string, cols: number, rows: number) => void
-  getTerminalTitle: (tabId: string) => Promise<{ issue: string; detail: string }>
+  getTerminalTitle: (tabId: string) => Promise<{ issue: string; detail: string; model: string | null; activeAgents: ActiveAgent[] }>
   setTerminalIssue: (tabId: string, issue: string) => Promise<void>
   listTerminalInfo: () => Promise<TabInfo[]>
   getTabHasClaude: (tabId: string) => Promise<boolean>
