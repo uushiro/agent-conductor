@@ -654,11 +654,11 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         const togglePopover = (e: React.MouseEvent) => {
           e.stopPropagation()
           // Anchor on the clicked tab element (not the tiny badge span): the
-          // panel juts out to the right of the tab, below the tab bar.
+          // panel opens directly below the clicked tab, aligned to its left edge.
           const tabEl = (e.currentTarget as HTMLElement).closest('.tab')
           const rect = (tabEl ?? (e.currentTarget as HTMLElement)).getBoundingClientRect()
           const POPOVER_WIDTH = 280 // matches .tab-agent-popover max-width
-          let x = rect.right + 6
+          let x = rect.left
           if (x + POPOVER_WIDTH > window.innerWidth - 8) {
             // Near the right edge: clamp back inside the viewport
             x = Math.max(8, window.innerWidth - POPOVER_WIDTH - 8)
