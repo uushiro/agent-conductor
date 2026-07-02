@@ -72,29 +72,49 @@ const tabModelScanBuf = new Map<string, string>()
 // line so bare mentions of model names (chat text, [[AGENT:]] markers) don't false-positive.
 // Deliberately loose about the text in between ("with medium effort" etc. may change).
 const MODEL_BANNER_RE = /\b(Opus|Sonnet|Haiku|Fable)\b[^\n·•]{0,40}[·•]/gi
+// tabId → unscanned RAW tail buffer for OSC 777 AGENT-marker detection. Claude Code hooks
+// emit markers mechanically as \x1b]777;notify;AGENT;[[AGENT: label :: model :: status]]\x07
+// (BEL or ST terminated). This must be scanned on the raw pty stream BEFORE any ANSI/OSC
+// stripping — the generic OSC strip regexes would swallow the whole sequence.
+const tabAgentOscBuf = new Map<string, string>()
+// OSC 777 AGENT envelope: capture the body up to BEL (\x07) or ST (\x1b\\)
+const AGENT_OSC_RE = /\x1b\]777;notify;AGENT;([^\x07\x1b]*)(?:\x07|\x1b\\)/g
+// The [[AGENT: label :: model :: started|done]] marker itself (shared by the OSC path
+// and the legacy plain-text fallback path)
+const AGENT_MARKER_RE = /\[\[AGENT:\s*([^\]:]+?)\s*::\s*([^\]:]+?)\s*::\s*(started|done)\s*\]\]/g
 // Deduplicate task emissions within a session (cleared on session:load)
 const emittedTaskTitles = new Set<string>()
 // tabId → timeout handle while watching for --resume failure ("No conversation found")
 const tabResumeWatch = new Map<string, ReturnType<typeof setTimeout>>()
 
 // --- In-tab worker agents ([[AGENT: label :: model :: started|done]]) ---
-// Dedup: TUI repaints (scroll/resize/turn-end) can re-emit the same marker, so each
-// exact marker (label::model::status) is processed once per tab. LRU-capped per tab.
-const tabAgentMarkerKeys = new Map<string, Set<string>>()
+// Dedup: physical re-emissions of the same marker (TUI repaints, chunk overlap re-scans)
+// are ignored for a short TTL window, NOT for the tab's lifetime — the same label can
+// legitimately be started again later (started → done → started must count twice).
+// The window slides: each duplicate sighting refreshes the timestamp, so a marker being
+// repainted continuously stays suppressed, but a genuinely new run after quiet time passes.
+// Additionally, a `done` clears the label's `started` dedup records so an immediate
+// relaunch of the same label is never blocked. LRU-capped per tab.
+const tabAgentMarkerSeen = new Map<string, Map<string, number>>() // tabId → (marker key → last seen ms)
+const AGENT_MARKER_DEDUP_TTL_MS = 5000
 const AGENT_MARKER_DEDUP_MAX_PER_TAB = 200
 
 // Handle a detected [[AGENT: label :: model :: status]] marker from tab `tabId`.
 // started → upsert into activeAgents (by label); done → remove the entry.
+// Idempotent per state: duplicate started upserts / done removals are harmless, so a
+// marker slipping through dedup (or arriving via both OSC and plain-text paths) is safe.
 function handleAgentMarker(tabId: string, label: string, model: string, status: 'started' | 'done') {
   const key = `${label}::${model}::${status}`
-  let keys = tabAgentMarkerKeys.get(tabId)
-  if (!keys) { keys = new Set(); tabAgentMarkerKeys.set(tabId, keys) }
-  if (keys.has(key)) return
-  keys.add(key)
-  while (keys.size > AGENT_MARKER_DEDUP_MAX_PER_TAB) {
-    const oldest = keys.values().next().value as string
-    keys.delete(oldest)
+  let seen = tabAgentMarkerSeen.get(tabId)
+  if (!seen) { seen = new Map(); tabAgentMarkerSeen.set(tabId, seen) }
+  const now = Date.now()
+  const last = seen.get(key)
+  seen.set(key, now) // (re)insert — refreshes sliding TTL and LRU position
+  if (seen.size > AGENT_MARKER_DEDUP_MAX_PER_TAB) {
+    const oldest = seen.keys().next().value as string
+    seen.delete(oldest)
   }
+  if (last !== undefined && now - last < AGENT_MARKER_DEDUP_TTL_MS) return
 
   const info = tabInfo.get(tabId)
   if (!info) return
@@ -109,6 +129,12 @@ function handleAgentMarker(tabId: string, label: string, model: string, status: 
     }
   } else {
     info.activeAgents = info.activeAgents.filter((a) => a.label !== label)
+    // Clear the label's `started` dedup records so relaunching the same label
+    // right away is not swallowed by the TTL window.
+    const prefix = `${label}::`
+    for (const k of [...seen.keys()]) {
+      if (k.startsWith(prefix) && k.endsWith('::started')) seen.delete(k)
+    }
   }
   tabInfo.set(tabId, info)
 }
@@ -789,6 +815,26 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
         } catch { /* ignore decode errors */ }
       }
     }
+    // Detect OSC 777 AGENT markers on the RAW stream, before any ANSI/OSC stripping
+    // (Claude Code hooks send [[AGENT:]] markers mechanically inside an OSC 777 envelope;
+    //  the stripped-buffer detectors below never see it because OSC strip removes it whole).
+    {
+      const overlap = tabAgentOscBuf.get(id) || ''
+      const raw = overlap + data
+      let lastMatchEnd = 0
+      for (const m of raw.matchAll(AGENT_OSC_RE)) {
+        const inner = new RegExp(AGENT_MARKER_RE.source).exec(m[1])
+        if (inner) {
+          const label = inner[1].trim()
+          const model = inner[2].trim()
+          if (label && model) handleAgentMarker(id, label, model, inner[3] as 'started' | 'done')
+        }
+        lastMatchEnd = m.index! + m[0].length
+      }
+      // Keep only the unmatched tail so an OSC split across chunks still assembles
+      tabAgentOscBuf.set(id, raw.slice(Math.max(lastMatchEnd, raw.length - 500)))
+    }
+
     mainWindow?.webContents.send('terminal:data', id, data)
     const prev = tabLastOutput.get(id) || ''
     const combined = (prev + data).slice(-3000)
@@ -886,7 +932,9 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
         lastMatchEnd = Math.max(lastMatchEnd, match.index! + match[0].length)
       }
       // Detect [[AGENT: label :: model :: started|done]] pattern — in-tab worker tracking
-      for (const match of stripped.matchAll(/\[\[AGENT:\s*([^\]:]+?)\s*::\s*([^\]:]+?)\s*::\s*(started|done)\s*\]\]/g)) {
+      // (legacy plain-text fallback; the primary path is the OSC 777 hook envelope above.
+      //  A marker arriving via both paths is absorbed by handleAgentMarker's TTL dedup.)
+      for (const match of stripped.matchAll(AGENT_MARKER_RE)) {
         const label = match[1].trim()
         const model = match[2].trim()
         if (label && model) handleAgentMarker(id, label, model, match[3] as 'started' | 'done')
@@ -1060,6 +1108,8 @@ function createWindow() {
     emittedTaskTitles.clear()
     agentMsgQueue.length = 0
     tabSentAgentMsgKeys.clear()
+    tabAgentMarkerSeen.clear()
+    tabAgentOscBuf.clear()
     for (const t of tabResumeWatch.values()) clearTimeout(t)
     tabResumeWatch.clear()
     for (const w of tabSessionWatchers.values()) clearInterval(w)
@@ -1116,7 +1166,8 @@ function createWindow() {
     tabTaskScanBuf.delete(tabId)
     tabModelScanBuf.delete(tabId)
     tabSentAgentMsgKeys.delete(tabId)
-    tabAgentMarkerKeys.delete(tabId)
+    tabAgentMarkerSeen.delete(tabId)
+    tabAgentOscBuf.delete(tabId)
     const sw = tabSessionWatchers.get(tabId)
     if (sw) { clearInterval(sw); tabSessionWatchers.delete(tabId) }
     const idx = tabOrder.indexOf(tabId)
