@@ -30,9 +30,10 @@ const tabInfo = new Map<string, {
   activeAgents: ActiveAgent[]
 }>()
 
-// Normalize a --model argument to a known Claude model family (for the tab badge).
-// Detection is spawn-command based (machine-parsed from the launch args), NOT agent
-// self-reporting — unknown values return null and the badge is simply hidden.
+// Normalize a model string to a known Claude model family (for the tab badge).
+// Sources: launch args (--model sonnet) and the stdout startup banner ("Sonnet 5",
+// "Opus 4.8", ...). Substring match, so version-suffixed banner forms normalize too.
+// Unknown values return null and the badge is simply hidden.
 function normalizeClaudeModel(raw: string): string | null {
   const s = raw.toLowerCase()
   if (s.includes('fable')) return 'fable'
@@ -62,6 +63,15 @@ const tabTaskCooldown = new Map<string, number>()
 const TASK_RESUME_COOLDOWN_MS = 60000
 // tabId → unscanned tail buffer for [[TASK:]] detection (consumed on match to prevent re-detection)
 const tabTaskScanBuf = new Map<string, string>()
+// tabId → unscanned tail buffer for stdout startup-banner model detection
+// (e.g. "Sonnet 5 with medium effort · Claude Max"). stdout is the ground truth for the
+// actually-selected model: it covers plain `claude` launches (no --model) and resumes,
+// and overrides the provisional --model input parse. Last detection wins.
+const tabModelScanBuf = new Map<string, string>()
+// Model family + optional version digits, anchored to the "·"/"•" separator of the banner
+// line so bare mentions of model names (chat text, [[AGENT:]] markers) don't false-positive.
+// Deliberately loose about the text in between ("with medium effort" etc. may change).
+const MODEL_BANNER_RE = /\b(Opus|Sonnet|Haiku|Fable)\b[^\n·•]{0,40}[·•]/gi
 // Deduplicate task emissions within a session (cleared on session:load)
 const emittedTaskTitles = new Set<string>()
 // tabId → timeout handle while watching for --resume failure ("No conversation found")
@@ -785,6 +795,34 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
     tabLastOutput.set(id, combined)
     tabLastOutputAt.set(id, Date.now())
 
+    // Detect the Claude Code startup-banner model line (e.g. "Sonnet 5 with medium effort · Claude Max").
+    // Runs outside the [[TASK:]] resume cooldown on purpose: resume replay repaints the
+    // banner too, and we want the badge to follow it. Same chunk-buffer/ANSI-strip scheme
+    // as the [[TASK:]]/[[SEND:]] detectors; repaint duplicates are harmless (idempotent overwrite).
+    {
+      const overlap = tabModelScanBuf.get(id) || ''
+      const scanBuf = (overlap + data)
+        .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+        .replace(/\r/g, '')
+      let lastMatchEnd = 0
+      let detected: string | null = null
+      for (const m of scanBuf.matchAll(MODEL_BANNER_RE)) {
+        const normalized = normalizeClaudeModel(m[1])
+        if (normalized) detected = normalized // last detection wins
+        lastMatchEnd = m.index! + m[0].length
+      }
+      if (detected) {
+        const info = tabInfo.get(id)
+        if (info && info.model !== detected) {
+          info.model = detected
+          tabInfo.set(id, info)
+        }
+      }
+      // Keep only the unmatched tail for split-chunk detection (banner line is short)
+      tabModelScanBuf.set(id, scanBuf.slice(Math.max(lastMatchEnd, scanBuf.length - 200)))
+    }
+
     // Detect --resume failure: "No conversation found" → fall back to fresh claude
     if (tabResumeWatch.has(id)) {
       const stripped = combined
@@ -1076,6 +1114,7 @@ function createWindow() {
     tabLastOutputAt.delete(tabId)
     tabLastInputAt.delete(tabId)
     tabTaskScanBuf.delete(tabId)
+    tabModelScanBuf.delete(tabId)
     tabSentAgentMsgKeys.delete(tabId)
     tabAgentMarkerKeys.delete(tabId)
     const sw = tabSessionWatchers.get(tabId)
@@ -1184,7 +1223,9 @@ function createWindow() {
         if (/^claude(\s|$)/.test(input)) {
           info.hadClaude = true
           // Machine-detect the model from the launch args (--model sonnet / --model=sonnet).
-          // No flag or unknown value → null → no badge shown.
+          // Provisional (user intent, shown immediately); the stdout startup-banner
+          // detection overwrites it with the actually-selected model once claude prints it.
+          // No flag or unknown value → null until the banner is detected.
           const modelMatch = input.match(/--model[=\s]+(\S+)/)
           info.model = modelMatch ? normalizeClaudeModel(modelMatch[1]) : null
           // If resuming a specific session, save the ID directly
