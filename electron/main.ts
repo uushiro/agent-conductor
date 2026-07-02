@@ -68,10 +68,17 @@ const tabTaskScanBuf = new Map<string, string>()
 // actually-selected model: it covers plain `claude` launches (no --model) and resumes,
 // and overrides the provisional --model input parse. Last detection wins.
 const tabModelScanBuf = new Map<string, string>()
-// Model family + optional version digits, anchored to the "·"/"•" separator of the banner
-// line so bare mentions of model names (chat text, [[AGENT:]] markers) don't false-positive.
-// Deliberately loose about the text in between ("with medium effort" etc. may change).
-const MODEL_BANNER_RE = /\b(Opus|Sonnet|Haiku|Fable)\b[^\n·•]{0,40}[·•]/gi
+// Genuine banner model line: "Sonnet 5 with medium effort · Claude Max". Requires
+// (1) version digits right after the model name (whitespace-separated, so URL slugs like
+//     "claude-fable-5-promotional-access" can't match), and
+// (2) "· Claude <plan>" as right context (the plan segment always starts with "Claude").
+// This kills promo-text false positives (e.g. the "Fable 5 is back ..." banner, whose
+// support URL followed by the "◐ medium · /effort" status line matched the old loose
+// pattern). Still deliberately loose about the middle ("with medium effort" may change).
+// Note: after CSI stripping, cursor-movement sequences vanish and rows concatenate
+// without newlines — so no line anchors, and no proximity to "Claude Code vX.Y.Z"
+// (the What's-new box sits between them) can be relied on.
+const MODEL_BANNER_RE = /\b(Opus|Sonnet|Haiku|Fable)\s+\d[\d.]*[^\n·•]{0,40}[·•]\s*Claude\b/gi
 // tabId → unscanned RAW tail buffer for OSC 777 AGENT-marker detection. Claude Code hooks
 // emit markers mechanically as \x1b]777;notify;AGENT;[[AGENT: label :: model :: status]]\x07
 // (BEL or ST terminated). This must be scanned on the raw pty stream BEFORE any ANSI/OSC
