@@ -49,7 +49,9 @@ const MENU_MODELS: ClaudeModel[] = ['fable', 'sonnet', 'haiku']
 
 function getModelBadge(model: string | null): { letter: string; color: string; full: string } | null {
   if (!model) return null
-  return CLAUDE_MODELS[model as ClaudeModel] ?? null
+  // Strip the inherited-model suffix added by the marker hook (e.g. "fable (継承)")
+  const key = model.replace(/\s*\(継承\)\s*$/, '')
+  return CLAUDE_MODELS[key as ClaudeModel] ?? null
 }
 
 interface Props {
@@ -693,7 +695,11 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
                     return (
                       <div key={a.label} className="tab-agent-popover-item">
                         <span className="tab-model-dot" style={{ background: ab?.color ?? 'var(--text-muted)' }} />
-                        <span className="tab-agent-popover-letter" style={{ color: ab?.color ?? 'var(--text-muted)' }}>
+                        <span
+                          className="tab-agent-popover-letter"
+                          style={{ color: ab?.color ?? 'var(--text-muted)' }}
+                          title={ab ? (a.model?.includes('継承') ? `${ab.full} (継承)` : ab.full) : (a.model ?? undefined)}
+                        >
                           {ab?.letter ?? '?'}
                         </span>
                         <span className="tab-agent-popover-label">{a.label}</span>

@@ -126,7 +126,11 @@ function handleAgentMarker(tabId: string, label: string, model: string, status: 
   const info = tabInfo.get(tabId)
   if (!info) return
   if (status === 'started') {
-    const normalized = normalizeClaudeModel(model) ?? model
+    // Keep the " (継承)" suffix (hook-resolved inherited parent model) so the
+    // popover can distinguish inherited models; the renderer strips it for
+    // badge lookup.
+    const base = normalizeClaudeModel(model)
+    const normalized = base ? (model.includes('継承') ? `${base} (継承)` : base) : model
     const existing = info.activeAgents.find((a) => a.label === label)
     if (existing) {
       existing.model = normalized
