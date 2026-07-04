@@ -16,6 +16,21 @@ interface TerminalProps {
   onFocusRequest?: () => void
 }
 
+// xterm の SelectionService#selectionText は、複数行ドラッグの終点が
+// 次の行の先頭（column 0）に来た場合でも「その行」を選択範囲の一部として
+// 扱い、空文字列を末尾に push してしまう（isWrapped でない行として区切り文字
+// \n を伴う）。結果として「最終行の下にわずかに入り込んだだけ」でコピー結果の
+// 末尾に意図しない空行（余分な改行）が付与される。
+// これは xterm.js 側の既知の挙動で、実際に折り返し行(isWrapped)は
+// translateBufferLineToString 側で正しく連結されているため（本アプリ含め
+// getSelection() をそのまま使うだけでは折り返し改行の混入は発生しない）、
+// 余分な改行の主因はこの「終端オーバーシュートによる末尾の空行」である。
+// 意図的に空行を選択したケース(複数の空行が続く末尾選択)まで壊さないよう、
+// 末尾の改行は1つだけ取り除く。
+function stripTrailingSelectionNewline(text: string): string {
+  return text.replace(/\r?\n$/, '')
+}
+
 export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocusRequest }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<XTerm | null>(null)
@@ -160,7 +175,7 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
         // getSelection() が残っていれば優先、なければ onSelectionChange で捕捉した値を使う
         const sel = term.getSelection() || lastSelText
         lastSelText = ''
-        if (sel) window.electronAPI.copyToClipboard(sel)
+        if (sel) window.electronAPI.copyToClipboard(stripTrailingSelectionNewline(sel))
       }, 0)
     }
     containerRef.current.addEventListener('mousedown', handleMouseDown)
