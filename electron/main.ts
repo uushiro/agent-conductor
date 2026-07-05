@@ -846,10 +846,14 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
       tabAgentOscBuf.set(id, raw.slice(Math.max(lastMatchEnd, raw.length - 500)))
     }
 
-    // Recolor "Stop hook error: ..." lines to dim gray before they reach xterm.js.
-    // Claude Code prints this line in its normal (often yellow/orange) attention color;
-    // the reason text itself is already short, but the color still draws the eye. We
-    // rewrite only the matched span to explicit ANSI 90 (bright black/gray) and reset the
+    // Recolor "Stop hook error ..." lines to dim gray before they reach xterm.js.
+    // Claude Code's actual notification text is "Stop hook error occurred · ctrl+o to
+    // see" (no colon after "error" — verified against the installed CLI binary via
+    // `strings`; there is no "Stop hook error:" string anywhere in it). An earlier
+    // version of this rewrite matched literal "Stop hook error:" and therefore never
+    // matched anything, silently leaving the line in its original color. We now match
+    // on the "Stop hook error" prefix alone (no trailing colon assumed) and rewrite
+    // only the matched span to explicit ANSI 90 (bright black/gray), resetting the
     // foreground back to default (39) right after — any SGR codes appearing before or
     // after the match (already applied by Claude Code) are left untouched, so a reset
     // code that follows still terminates whatever attributes were active. The match stops
@@ -858,8 +862,8 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
     // are usually flushed as one line for a single console.error call), the half that
     // arrived in an earlier chunk keeps its original color. That's a cosmetic miss, not a
     // functional break.
-    const dataForRenderer = data.includes('Stop hook error:')
-      ? data.replace(/Stop hook error:[^\n\r\x1b]*/g, (m) => `\x1b[90m${m}\x1b[39m`)
+    const dataForRenderer = data.includes('Stop hook error')
+      ? data.replace(/Stop hook error[^\n\r\x1b]*/g, (m) => `\x1b[90m${m}\x1b[39m`)
       : data
 
     mainWindow?.webContents.send('terminal:data', id, dataForRenderer)
