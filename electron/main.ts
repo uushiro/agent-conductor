@@ -67,11 +67,11 @@ const tabLastOutputAt = new Map<string, number>()
 const tabLastInputAt = new Map<string, number>()
 const tabSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
 const tabGeminiSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
-// tabId → timestamp until which [[TASK:]] detection is suppressed (resume replay window)
-const tabTaskCooldown = new Map<string, number>()
-const TASK_RESUME_COOLDOWN_MS = 60000
-// tabId → unscanned tail buffer for [[TASK:]] detection (consumed on match to prevent re-detection)
-const tabTaskScanBuf = new Map<string, string>()
+// tabId → timestamp until which [[SEND:]]/[[AGENT:]] detection is suppressed (resume replay window)
+const tabResumeCooldown = new Map<string, number>()
+const RESUME_COOLDOWN_MS = 60000
+// tabId → unscanned tail buffer for [[SEND:]]/[[AGENT:]] detection (consumed on match to prevent re-detection)
+const tabDetectScanBuf = new Map<string, string>()
 // tabId → unscanned tail buffer for stdout startup-banner model detection
 // (e.g. "Sonnet 5 with medium effort · Claude Max"). stdout is the ground truth for the
 // actually-selected model: it covers plain `claude` launches (no --model) and resumes,
@@ -98,8 +98,6 @@ const AGENT_OSC_RE = /\x1b\]777;notify;AGENT;([^\x07\x1b]*)(?:\x07|\x1b\\)/g
 // The [[AGENT: label :: model :: started|done]] marker itself (shared by the OSC path
 // and the legacy plain-text fallback path)
 const AGENT_MARKER_RE = /\[\[AGENT:\s*([^\]:]+?)\s*::\s*([^\]:]+?)\s*::\s*(started|done)\s*\]\]/g
-// Deduplicate task emissions within a session (cleared on session:load)
-const emittedTaskTitles = new Set<string>()
 // tabId → timeout handle while watching for --resume failure ("No conversation found")
 const tabResumeWatch = new Map<string, ReturnType<typeof setTimeout>>()
 
@@ -882,9 +880,9 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
     tabLastOutputAt.set(id, Date.now())
 
     // Detect the Claude Code startup-banner model line (e.g. "Sonnet 5 with medium effort · Claude Max").
-    // Runs outside the [[TASK:]] resume cooldown on purpose: resume replay repaints the
+    // Runs outside the resume cooldown on purpose: resume replay repaints the
     // banner too, and we want the badge to follow it. Same chunk-buffer/ANSI-strip scheme
-    // as the [[TASK:]]/[[SEND:]] detectors; repaint duplicates are harmless (idempotent overwrite).
+    // as the [[SEND:]] detector; repaint duplicates are harmless (idempotent overwrite).
     {
       const overlap = tabModelScanBuf.get(id) || ''
       const scanBuf = (overlap + data)
@@ -940,30 +938,13 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
       }
     }
 
-    // Detect [[TASK: ...]] pattern — skip during resume replay cooldown
-    const cooldownEnd = tabTaskCooldown.get(id) ?? 0
+    // Detect [[SEND:]]/[[AGENT:]] patterns — skip during resume replay cooldown
+    const cooldownEnd = tabResumeCooldown.get(id) ?? 0
     if (Date.now() > cooldownEnd) {
-      const overlap = tabTaskScanBuf.get(id) || ''
+      const overlap = tabDetectScanBuf.get(id) || ''
       const scanBuf = overlap + data
       const stripped = scanBuf.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\r/g, '')
       let lastMatchEnd = 0
-      for (const match of stripped.matchAll(/\[\[TASK:\s*(.+?)\]\]/g)) {
-        const title = match[1].trim()
-        const normalized = title.toLowerCase()
-        if (title && !emittedTaskTitles.has(normalized)) {
-          emittedTaskTitles.add(normalized)
-          mainWindow?.webContents.send('task:add', title)
-        }
-        lastMatchEnd = match.index! + match[0].length
-      }
-      // Detect [[TASK-SETALL: ...json...]] pattern — replaces entire task list
-      for (const match of stripped.matchAll(/\[\[TASK-SETALL:\s*(.+?)\]\]/g)) {
-        try {
-          const tasksJson = match[1].trim()
-          mainWindow?.webContents.send('task:set-all', tasksJson)
-        } catch { /* ignore */ }
-        lastMatchEnd = Math.max(lastMatchEnd, match.index! + match[0].length)
-      }
       // Detect [[SEND: dest :: body]] pattern — agent-to-agent message routing
       for (const match of stripped.matchAll(/\[\[SEND:\s*([^\]:]+?)\s*::\s*([\s\S]+?)\]\]/g)) {
         const dest = match[1].trim()
@@ -982,7 +963,7 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
       }
       // Keep only the unmatched tail for split-chunk detection
       // (500 chars: [[SEND:]] bodies can be long and split across chunks)
-      tabTaskScanBuf.set(id, stripped.slice(Math.max(lastMatchEnd, stripped.length - 500)))
+      tabDetectScanBuf.set(id, stripped.slice(Math.max(lastMatchEnd, stripped.length - 500)))
     }
   })
 
@@ -1143,9 +1124,8 @@ function createWindow() {
     tabLastOutput.clear()
     tabLastOutputAt.clear()
     tabLastInputAt.clear()
-    tabTaskScanBuf.clear()
-    tabTaskCooldown.clear()
-    emittedTaskTitles.clear()
+    tabDetectScanBuf.clear()
+    tabResumeCooldown.clear()
     agentMsgQueue.length = 0
     tabSentAgentMsgKeys.clear()
     tabAgentMarkerSeen.clear()
@@ -1203,7 +1183,7 @@ function createWindow() {
     tabLastOutput.delete(tabId)
     tabLastOutputAt.delete(tabId)
     tabLastInputAt.delete(tabId)
-    tabTaskScanBuf.delete(tabId)
+    tabDetectScanBuf.delete(tabId)
     tabModelScanBuf.delete(tabId)
     tabSentAgentMsgKeys.delete(tabId)
     tabAgentMarkerSeen.delete(tabId)
@@ -1300,7 +1280,7 @@ function createWindow() {
           tabInfo.set(tabId, info)
           startGeminiSessionWatch(tabId, info.cwd || HOME)
           if (/--resume/.test(input)) {
-            tabTaskCooldown.set(tabId, Date.now() + TASK_RESUME_COOLDOWN_MS)
+            tabResumeCooldown.set(tabId, Date.now() + RESUME_COOLDOWN_MS)
           }
         }
 
@@ -1328,8 +1308,8 @@ function createWindow() {
             info.claudeResumeParentId = resumeMatch[1]
             tabInfo.set(tabId, info)
             startSessionWatch(tabId, info.cwd || HOME)
-            // Suppress [[TASK:]] detection during resume replay
-            tabTaskCooldown.set(tabId, Date.now() + TASK_RESUME_COOLDOWN_MS)
+            // Suppress [[SEND:]]/[[AGENT:]] detection during resume replay
+            tabResumeCooldown.set(tabId, Date.now() + RESUME_COOLDOWN_MS)
             // Watch for resume failure; auto-fallback to plain claude if detected
             const prevWatch = tabResumeWatch.get(tabId)
             if (prevWatch) clearTimeout(prevWatch)
@@ -1349,8 +1329,8 @@ function createWindow() {
           tabInfo.set(tabId, info)
           // Record the time the user sent input (used for sidebar ordering)
           tabLastInputAt.set(tabId, Date.now())
-          // Resume replay is over — user is now interacting, allow task detection
-          tabTaskCooldown.delete(tabId)
+          // Resume replay is over — user is now interacting, allow [[SEND:]]/[[AGENT:]] detection
+          tabResumeCooldown.delete(tabId)
         }
       }
     } else if (data === '\x7f' || data === '\b') {

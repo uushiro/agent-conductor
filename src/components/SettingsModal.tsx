@@ -259,7 +259,7 @@ export function SettingsModal({ onClose }: Props) {
             <div className="settings-widget-list">
               {(sidebarWidgets ?? DEFAULT_WIDGETS).map((w, idx) => {
                 const widgets = sidebarWidgets ?? DEFAULT_WIDGETS
-                const LABEL: Record<WidgetId, string> = { sessions: 'Sessions', tasks: 'Tasks', resume: 'Resume' }
+                const LABEL: Record<WidgetId, string> = { sessions: 'Sessions', resume: 'Resume' }
                 return (
                   <div key={w.id} className="settings-widget-row">
                     <button

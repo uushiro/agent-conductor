@@ -8,12 +8,11 @@ export type InputSendMode = 'enter' | 'button' | 'cmd-enter'
 
 export type InputSubmitMode = 'direct' | 'paste'
 
-export type WidgetId = 'sessions' | 'tasks' | 'resume'
+export type WidgetId = 'sessions' | 'resume'
 export interface WidgetConfig { id: WidgetId; enabled: boolean }
 
 const DEFAULT_WIDGETS: WidgetConfig[] = [
   { id: 'sessions', enabled: true },
-  { id: 'tasks', enabled: true },
   { id: 'resume', enabled: true },
 ]
 

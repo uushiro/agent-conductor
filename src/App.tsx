@@ -238,7 +238,6 @@ export function App() {
         <Sidebar
           activeTabId={activeTabId}
           onTabSelect={selectTab}
-          onSendToAgent={(prompt, agent) => tabsRef.current?.sendToNewTab(prompt, agent)}
           onResumeSession={(sessionId) => tabsRef.current?.resumeSession(sessionId)}
           fileTreeVisible={fileTreeVisible}
           onToggleFileTree={() => updateSettings({ fileTreeVisible: !fileTreeVisible })}

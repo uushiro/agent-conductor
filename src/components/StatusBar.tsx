@@ -89,10 +89,6 @@ export function StatusBar() {
                 <p>{t.helpSidebar}</p>
               </div>
               <div className="settings-help-item">
-                <span className="settings-help-label">{lang === 'ja' ? 'タスク連携' : 'Task Integration'}</span>
-                <p>{t.helpTasksFromClaude}</p>
-              </div>
-              <div className="settings-help-item">
                 <span className="settings-help-label">{lang === 'ja' ? 'ファイルツリー' : 'File Tree'}</span>
                 <p>{t.helpFileTree}</p>
               </div>

@@ -1,6 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useTasks } from '../hooks/useTasks'
-import { TaskItem } from './TaskItem'
 import { ResumeWidget } from './ResumeWidget'
 import { useLang, strings } from '../contexts/LangContext'
 import { useSettings } from '../contexts/SettingsContext'
@@ -9,7 +7,6 @@ import type { TabInfo } from '../global'
 interface Props {
   onTabSelect: (tabId: string) => void
   activeTabId: string
-  onSendToAgent: (prompt: string, agent: 'claude' | 'gemini') => void
   onResumeSession: (sessionId: string) => void
   fileTreeVisible: boolean
   onToggleFileTree: () => void
@@ -36,16 +33,12 @@ function saveFlex(ids: string[], values: number[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(obj))
 }
 
-export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, onResumeSession, fileTreeVisible, onToggleFileTree, width }: Props) {
+export function Sidebar({ activeTabId, onTabSelect, onResumeSession, fileTreeVisible, onToggleFileTree, width }: Props) {
   const { lang } = useLang()
   const t = strings[lang]
   const { sidebarWidgets, resumeProjectDirs } = useSettings()
-  const { tasks, addTask, toggleTask, deleteTask, editTask, setTasks } = useTasks()
-  const [input, setInput] = useState('')
   const [tabInfos, setTabInfos] = useState<TabInfo[]>([])
-  const [flashTaskId, setFlashTaskId] = useState<string | null>(null)
   const [tooltip, setTooltip] = useState<{ text: string; top: number } | null>(null)
-  const tasksRef = useRef(tasks)
   const sidebarRef = useRef<HTMLElement>(null)
 
   const enabledWidgets = (sidebarWidgets ?? []).filter((w) => w.enabled)
@@ -72,42 +65,12 @@ export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, onResumeSessi
   }
   const hideTooltip = () => setTooltip(null)
 
-  tasksRef.current = tasks
-
-  useEffect(() => {
-    return window.electronAPI.onTaskSetAll((tasksJson) => {
-      try { setTasks(JSON.parse(tasksJson)) } catch { /* ignore */ }
-    })
-  }, [setTasks])
-
-  useEffect(() => {
-    return window.electronAPI.onTaskAdd((title) => {
-      const normalized = title.trim().toLowerCase()
-      const exists = tasksRef.current.some(t => t.title.trim().toLowerCase() === normalized)
-      if (exists) return
-      const id = addTask(title)
-      if (id) {
-        setFlashTaskId(id)
-        setTimeout(() => setFlashTaskId(null), 1500)
-      }
-    })
-  }, [addTask])
-
   useEffect(() => {
     const poll = () => window.electronAPI.listTerminalInfo().then(setTabInfos)
     poll()
     const interval = setInterval(poll, 2000)
     return () => clearInterval(interval)
   }, [])
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault()
-    addTask(input)
-    setInput('')
-  }
-
-  const pending = tasks.filter((t) => !t.done)
-  const completed = tasks.filter((t) => t.done)
 
   const handleResizeDrag = useCallback((e: React.MouseEvent, idx: number) => {
     e.preventDefault()
@@ -178,37 +141,6 @@ export function Sidebar({ activeTabId, onTabSelect, onSendToAgent, onResumeSessi
               </div>
             </div>
           ))}
-        </div>
-      </>
-    )
-
-    if (id === 'tasks') return (
-      <>
-        <div className="sidebar-header">
-          <h2>{t.tasks}</h2>
-          <span className="task-count">{lang === 'ja' ? `${pending.length}${t.remaining}` : `${pending.length} ${t.remaining}`}</span>
-        </div>
-        <form className="task-form" onSubmit={handleSubmit}>
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={t.addTask}
-            className="task-input"
-          />
-        </form>
-        <div className="task-list">
-          {pending.map((task) => (
-            <TaskItem key={task.id} task={task} onToggle={toggleTask} onDelete={deleteTask} onEdit={editTask} onSendToAgent={onSendToAgent} flash={flashTaskId === task.id} onShowTooltip={showTooltip} onHideTooltip={hideTooltip} />
-          ))}
-          {completed.length > 0 && (
-            <>
-              <div className="task-divider">Completed</div>
-              {completed.map((task) => (
-                <TaskItem key={task.id} task={task} onToggle={toggleTask} onDelete={deleteTask} onEdit={editTask} onSendToAgent={onSendToAgent} flash={false} onShowTooltip={showTooltip} onHideTooltip={hideTooltip} />
-              ))}
-            </>
-          )}
         </div>
       </>
     )
