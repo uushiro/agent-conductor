@@ -8,6 +8,15 @@ import { execFile } from 'node:child_process'
 // node-pty is a native module — require it
 const pty = require('node-pty')
 
+// Dev and packaged-prod builds must never share a userData directory: a shared
+// directory let dev test runs (session-dev.json etc.) write into the same folder
+// as the packaged app and previously caused dev data to leak into prod. Redirect
+// dev's userData to a sibling directory before any other Electron API call reads
+// or writes into it. Same dev condition as the session-dev.json branch below.
+if (process.env.NODE_ENV === 'development' || !!process.env.VITE_DEV_SERVER_URL) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'agent-conductor-dev'))
+}
+
 let mainWindow: BrowserWindow | null = null
 let ipcHandlersRegistered = false
 let quitConfirmPending = false
