@@ -220,16 +220,18 @@ function resolveTabByName(name: string, excludeTabId: string): string | null {
   return null
 }
 
-// Inject a message into the destination PTY via bracketed paste, then submit with \r
+// Inject a message into the destination PTY via bracketed paste.
+// SECURITY: does NOT auto-submit with \r. Auto-execution here would let a
+// prompt-injected [[SEND:]] block in one tab's output silently drive actions
+// in another tab with no human in the loop. The pasted text sits in the
+// destination's input line; a human watching that tab must press Enter to
+// actually run it. The "[from: <fromName>] " prefix makes the message's
+// origin visible to that human before they decide to submit.
 function deliverAgentMsg(msg: AgentMsg) {
   const proc = ptyProcesses.get(msg.toTabId)
   if (!proc) return
   const text = `[from: ${msg.fromName}] ${msg.body}`
   proc.write('\x1b[200~' + text + '\x1b[201~')
-  setTimeout(() => {
-    const p = ptyProcesses.get(msg.toTabId)
-    if (p) p.write('\r')
-  }, 150)
   mainWindow?.webContents.send('agent-msg:notify', {
     type: 'delivered', from: msg.fromName, dest: tabInfo.get(msg.toTabId)?.issue || msg.toTabId, body: msg.body,
   })
