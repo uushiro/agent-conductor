@@ -91,6 +91,11 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
   const [editingTabId, setEditingTabId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [confirmClose, setConfirmClose] = useState<{ tabId: string; issue: string } | null>(null)
+  // Worktree tab creation: branch-name prompt bar + error toast
+  const [worktreePrompt, setWorktreePrompt] = useState<{ tabId: string } | null>(null)
+  const [worktreeBranch, setWorktreeBranch] = useState('')
+  const [worktreeBusy, setWorktreeBusy] = useState(false)
+  const [worktreeError, setWorktreeError] = useState<string | null>(null)
   const [closedHistory, setClosedHistory] = useState<ClosedEntry[]>([])
   const [showRestoreMenu, setShowRestoreMenu] = useState(false)
   const [showAgentMenu, setShowAgentMenu] = useState(false)
@@ -113,6 +118,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
   const dragSrcIdx = useRef<number>(-1)
   const dragOverIdxRef = useRef<number>(-1)
   const editInputRef = useRef<HTMLInputElement>(null)
+  const worktreeInputRef = useRef<HTMLInputElement>(null)
   const restoreMenuRef = useRef<HTMLDivElement>(null)
   const agentMenuRef = useRef<HTMLDivElement>(null)
   const initialized = useRef(false)
@@ -250,6 +256,20 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       editInputRef.current.select()
     }
   }, [editingTabId])
+
+  // Focus branch-name input when the worktree prompt opens
+  useEffect(() => {
+    if (worktreePrompt && worktreeInputRef.current) {
+      worktreeInputRef.current.focus()
+    }
+  }, [worktreePrompt])
+
+  // Auto-dismiss worktree error toast
+  useEffect(() => {
+    if (!worktreeError) return
+    const timer = setTimeout(() => setWorktreeError(null), 6000)
+    return () => clearTimeout(timer)
+  }, [worktreeError])
 
   // Close restore menu when clicking outside
   useEffect(() => {
@@ -396,6 +416,29 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       }, 1000)
     }
   }, [onActiveTabChange, defaultAgent])
+
+  // Open a new tab inside a fresh git worktree of the source tab's repo.
+  // Branch name is optional — main generates a default (wt-YYYYMMDD-HHmmss) when empty.
+  const openWorktreeTab = useCallback(async (srcTabId: string, branchName: string) => {
+    setWorktreeBusy(true)
+    try {
+      const res = await window.electronAPI.createWorktreeTerminal(srcTabId, branchName.trim() || undefined)
+      if (!res.ok) {
+        setWorktreeError(res.error || 'worktreeの作成に失敗しました')
+        return
+      }
+      setWorktreePrompt(null)
+      setWorktreeBranch('')
+      await window.electronAPI.setTerminalIssue(res.tabId, res.branch)
+      setTabs((prev) => [
+        ...prev,
+        { id: res.tabId, issue: res.branch, detail: 'Terminal', customIssue: true, resuming: false, model: null, activeAgents: [], agentStatus: 'none', promptChoices: [] },
+      ])
+      onActiveTabChange(res.tabId)
+    } finally {
+      setWorktreeBusy(false)
+    }
+  }, [onActiveTabChange])
 
   useImperativeHandle(ref, () => ({
     sendToNewTab: (prompt: string, agent: 'claude' | 'gemini' | 'codex') => {
@@ -892,6 +935,42 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
           </div>
         </div>
       </div>
+      {worktreePrompt && (
+        <div className="tab-confirm-bar tab-worktree-bar">
+          <span>worktreeで新規タブを開く — ブランチ名:</span>
+          <input
+            ref={worktreeInputRef}
+            className="tab-rename-input tab-worktree-input"
+            value={worktreeBranch}
+            placeholder="空欄で自動生成 (wt-日付-時刻)"
+            disabled={worktreeBusy}
+            onChange={(e) => setWorktreeBranch(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !worktreeBusy) openWorktreeTab(worktreePrompt.tabId, worktreeBranch)
+              if (e.key === 'Escape') { setWorktreePrompt(null); setWorktreeBranch('') }
+            }}
+          />
+          <button
+            className="tab-confirm-btn-cancel"
+            disabled={worktreeBusy}
+            onClick={() => openWorktreeTab(worktreePrompt.tabId, worktreeBranch)}
+          >
+            {worktreeBusy ? '作成中...' : '作成'}
+          </button>
+          <button
+            className="tab-confirm-btn-cancel"
+            disabled={worktreeBusy}
+            onClick={() => { setWorktreePrompt(null); setWorktreeBranch('') }}
+          >
+            {t.cancel}
+          </button>
+        </div>
+      )}
+      {worktreeError && (
+        <div className="tab-worktree-error" onClick={() => setWorktreeError(null)}>
+          worktree作成エラー: {worktreeError}
+        </div>
+      )}
       {confirmClose && (
         <div className="tab-confirm-bar">
           <span>「{confirmClose.issue}{t.closeConfirm}</span>
@@ -1004,6 +1083,18 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
                 </button>
               )
             )}
+            <button
+              className="tab-agent-item"
+              onClick={() => {
+                // Non-git dirs are rejected by main with a clear error (toast),
+                // so no pre-check IPC is needed here.
+                setWorktreeBranch('')
+                setWorktreePrompt({ tabId: ctxMenu.tabId })
+                setCtxMenu(null)
+              }}
+            >
+              worktreeで新規タブを開く
+            </button>
             <button
               className="tab-agent-item"
               onClick={() => {

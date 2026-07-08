@@ -1556,6 +1556,55 @@ function createWindow() {
     })
   })
 
+  // Create a new tab running inside a fresh git worktree of the source tab's repo.
+  // Parallel workers editing the same working tree cause commit mix-ups and
+  // pull/rebase conflicts — a dedicated worktree per tab avoids that structurally.
+  // Returns a structured result ({ ok, ... }) instead of rejecting so the renderer
+  // gets clean error messages (ipcMain.handle rejections are wrapped by Electron).
+  ipcMain.handle('terminal:create-worktree', async (_event, tabId: string, branchName?: string) => {
+    const cwd = tabInfo.get(tabId)?.cwd || HOME
+    const git = (args: string[], opts: { cwd: string; timeout: number }) =>
+      new Promise<string>((resolve, reject) => {
+        execFile('git', args, { ...opts, encoding: 'utf-8' }, (err, stdout, stderr) => {
+          if (err) reject(new Error((stderr || err.message || '').trim()))
+          else resolve(stdout.trim())
+        })
+      })
+
+    let repoRoot: string
+    try {
+      repoRoot = await git(['rev-parse', '--show-toplevel'], { cwd, timeout: 5000 })
+    } catch {
+      return { ok: false as const, error: 'gitリポジトリではありません' }
+    }
+
+    // Default branch: wt-YYYYMMDD-HHmmss (no date helper exists elsewhere in this file)
+    const branch = (branchName || '').trim() || (() => {
+      const d = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      return `wt-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+    })()
+
+    // Worktree goes next to the repo: <repoName>-wt-<branch> (slashes in branch → '-';
+    // skip the extra "wt-" when the branch itself already starts with it)
+    const repoName = path.basename(repoRoot)
+    const safeBranch = branch.replace(/[/\\]/g, '-')
+    const dirName = safeBranch.startsWith('wt-') ? `${repoName}-${safeBranch}` : `${repoName}-wt-${safeBranch}`
+    const worktreePath = path.join(path.dirname(repoRoot), dirName)
+    if (fs.existsSync(worktreePath)) {
+      return { ok: false as const, error: `${worktreePath} は既に存在します` }
+    }
+
+    try {
+      await git(['worktree', 'add', worktreePath, '-b', branch], { cwd: repoRoot, timeout: 15000 })
+    } catch (e) {
+      return { ok: false as const, error: `git worktree add に失敗: ${(e as Error).message}` }
+    }
+
+    const { id } = spawnPty(worktreePath)
+    return { ok: true as const, tabId: id, worktreePath, branch }
+  })
+
   // Handle cwd request
   ipcMain.handle('system:cwd', async () => {
     return HOME

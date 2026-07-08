@@ -3,6 +3,10 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 contextBridge.exposeInMainWorld('electronAPI', {
   // Terminal lifecycle
   createTerminal: (cwd?: string, pendingSessionId?: string) => ipcRenderer.invoke('terminal:create', cwd, pendingSessionId) as Promise<string>,
+  createWorktreeTerminal: (tabId: string, branchName?: string) =>
+    ipcRenderer.invoke('terminal:create-worktree', tabId, branchName) as Promise<
+      { ok: true; tabId: string; worktreePath: string; branch: string } | { ok: false; error: string }
+    >,
   closeTerminal: (tabId: string) => {
     ipcRenderer.send('terminal:close', tabId)
   },

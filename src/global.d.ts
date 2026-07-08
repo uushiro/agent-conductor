@@ -59,6 +59,9 @@ export interface SavedSession {
 
 export interface ElectronAPI {
   createTerminal: (cwd?: string, pendingSessionId?: string) => Promise<string>
+  createWorktreeTerminal: (tabId: string, branchName?: string) => Promise<
+    { ok: true; tabId: string; worktreePath: string; branch: string } | { ok: false; error: string }
+  >
   closeTerminal: (tabId: string) => void
   onTerminalData: (callback: (tabId: string, data: string) => void) => () => void
   sendTerminalInput: (tabId: string, data: string) => void
