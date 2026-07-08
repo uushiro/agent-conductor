@@ -67,10 +67,10 @@ const tabLastOutputAt = new Map<string, number>()
 const tabLastInputAt = new Map<string, number>()
 const tabSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
 const tabGeminiSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
-// tabId → timestamp until which [[SEND:]]/[[AGENT:]] detection is suppressed (resume replay window)
+// tabId → timestamp until which [[SEND:]] detection is suppressed (resume replay window)
 const tabResumeCooldown = new Map<string, number>()
 const RESUME_COOLDOWN_MS = 60000
-// tabId → unscanned tail buffer for [[SEND:]]/[[AGENT:]] detection (consumed on match to prevent re-detection)
+// tabId → unscanned tail buffer for [[SEND:]] detection (consumed on match to prevent re-detection)
 const tabDetectScanBuf = new Map<string, string>()
 // tabId → unscanned tail buffer for stdout startup-banner model detection
 // (e.g. "Sonnet 5 with medium effort · Claude Max"). stdout is the ground truth for the
@@ -95,8 +95,9 @@ const MODEL_BANNER_RE = /\b(Opus|Sonnet|Haiku|Fable)\s+\d[\d.]*[^\n·•]{0,40}[
 const tabAgentOscBuf = new Map<string, string>()
 // OSC 777 AGENT envelope: capture the body up to BEL (\x07) or ST (\x1b\\)
 const AGENT_OSC_RE = /\x1b\]777;notify;AGENT;([^\x07\x1b]*)(?:\x07|\x1b\\)/g
-// The [[AGENT: label :: model :: started|done]] marker itself (shared by the OSC path
-// and the legacy plain-text fallback path)
+// The [[AGENT: label :: model :: started|done]] marker itself. Only matched inside the
+// OSC 777 envelope above — plain-text [[AGENT:]] on the PTY stream is deliberately
+// ignored (external content echoed to the terminal could otherwise forge agent badges).
 const AGENT_MARKER_RE = /\[\[AGENT:\s*([^\]:]+?)\s*::\s*([^\]:]+?)\s*::\s*(started|done)\s*\]\]/g
 // tabId → timeout handle while watching for --resume failure ("No conversation found")
 const tabResumeWatch = new Map<string, ReturnType<typeof setTimeout>>()
@@ -970,7 +971,7 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
       }
     }
 
-    // Detect [[SEND:]]/[[AGENT:]] patterns — skip during resume replay cooldown
+    // Detect [[SEND:]] patterns — skip during resume replay cooldown
     const cooldownEnd = tabResumeCooldown.get(id) ?? 0
     if (Date.now() > cooldownEnd) {
       const overlap = tabDetectScanBuf.get(id) || ''
@@ -984,15 +985,10 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
         if (dest && body) handleAgentSend(id, dest, body)
         lastMatchEnd = Math.max(lastMatchEnd, match.index! + match[0].length)
       }
-      // Detect [[AGENT: label :: model :: started|done]] pattern — in-tab worker tracking
-      // (legacy plain-text fallback; the primary path is the OSC 777 hook envelope above.
-      //  A marker arriving via both paths is absorbed by handleAgentMarker's TTL dedup.)
-      for (const match of stripped.matchAll(AGENT_MARKER_RE)) {
-        const label = match[1].trim()
-        const model = match[2].trim()
-        if (label && model) handleAgentMarker(id, label, model, match[3] as 'started' | 'done')
-        lastMatchEnd = Math.max(lastMatchEnd, match.index! + match[0].length)
-      }
+      // [[AGENT:]] markers are NOT detected on this plain-text stream: only the OSC 777
+      // hook envelope above is trusted. A plain-text fallback used to live here (legacy
+      // from before the hook existed) but it let external content echoed on the PTY
+      // (cat'ed files, curl output) forge agent badges, so it was removed.
       // Keep only the unmatched tail for split-chunk detection
       // (500 chars: [[SEND:]] bodies can be long and split across chunks)
       tabDetectScanBuf.set(id, stripped.slice(Math.max(lastMatchEnd, stripped.length - 500)))
@@ -1340,7 +1336,7 @@ function createWindow() {
             info.claudeResumeParentId = resumeMatch[1]
             tabInfo.set(tabId, info)
             startSessionWatch(tabId, info.cwd || HOME)
-            // Suppress [[SEND:]]/[[AGENT:]] detection during resume replay
+            // Suppress [[SEND:]] detection during resume replay
             tabResumeCooldown.set(tabId, Date.now() + RESUME_COOLDOWN_MS)
             // Watch for resume failure; auto-fallback to plain claude if detected
             const prevWatch = tabResumeWatch.get(tabId)
@@ -1361,7 +1357,7 @@ function createWindow() {
           tabInfo.set(tabId, info)
           // Record the time the user sent input (used for sidebar ordering)
           tabLastInputAt.set(tabId, Date.now())
-          // Resume replay is over — user is now interacting, allow [[SEND:]]/[[AGENT:]] detection
+          // Resume replay is over — user is now interacting, allow [[SEND:]] detection
           tabResumeCooldown.delete(tabId)
         }
       }
