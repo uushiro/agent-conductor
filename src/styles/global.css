@@ -328,6 +328,65 @@ html, body, #root {
   font-style: italic;
 }
 
+/* Tab aggregate agent status (agentStatus from main.ts):
+   blue = running / blinking yellow = attention (select prompt needs an answer) /
+   purple = waiting (quiet, no prompt) / green = done (lingers ~8s).
+   Shown as a colored top bar on the tab (background is left to .tab / .tab-active). */
+.tab-status-running {
+  box-shadow: inset 0 2px 0 #58a6ff;
+}
+
+.tab-status-attention {
+  box-shadow: inset 0 2px 0 #d29922;
+  animation: attention-blink 1.5s ease-in-out infinite;
+}
+
+/* Slow blink for the attention top bar (#d29922 = rgb(210, 153, 34)) */
+@keyframes attention-blink {
+  0%, 100% { box-shadow: inset 0 2px 0 #d29922; }
+  50% { box-shadow: inset 0 2px 0 rgba(210, 153, 34, 0.25); }
+}
+
+.tab-status-waiting {
+  box-shadow: inset 0 2px 0 #bc8cff;
+}
+
+.tab-status-done {
+  box-shadow: inset 0 2px 0 #3fb950;
+}
+
+/* Quick-answer chips: number buttons shown on an attention tab when a select prompt
+   ("❯ 1. Yes / 2. No") is detected. Click answers without switching tabs.
+   Yellow tone matches the tab-status-attention top bar. */
+.tab-choice-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.tab-choice-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  color: #d29922;
+  background: transparent;
+  border: 1px solid #d29922;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.tab-choice-chip:hover {
+  color: var(--bg-primary);
+  background: #d29922;
+}
+
 /* Model badge on tabs (color dot + 1-letter abbreviation, e.g. F = Fable) */
 .tab-model-badge {
   display: inline-flex;
@@ -412,6 +471,30 @@ html, body, #root {
   font-size: 9px;
   color: var(--text-muted);
   flex-shrink: 0;
+}
+
+/* Popover status colors (matches the tab-status-* top bar colors) */
+.tab-agent-popover-status-running {
+  color: #58a6ff;
+}
+
+.tab-agent-popover-status-attention {
+  color: #d29922;
+  animation: attention-blink-text 1.5s ease-in-out infinite;
+}
+
+/* Slow blink for the attention popover status (same rhythm as the top bar) */
+@keyframes attention-blink-text {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.tab-agent-popover-status-waiting {
+  color: #bc8cff;
+}
+
+.tab-agent-popover-status-done {
+  color: #3fb950;
 }
 
 .tab-agent-popover-empty {

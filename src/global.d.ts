@@ -13,11 +13,25 @@ export interface ClosedTabEntry {
   model: string | null
 }
 
-// In-tab worker agent reported via [[AGENT: label :: model :: started|done]] markers
+// In-tab worker agent reported via [[AGENT: label :: model :: started|done]] markers.
+// done entries linger for a short window (doneAt) so completion stays visible.
 export interface ActiveAgent {
   label: string
   model: string
   status: 'started' | 'done'
+  doneAt?: number
+}
+
+// Aggregate per-tab agent status (tab-bar color coding):
+// 'running' (blue) / 'attention' (yellow blinking, a select prompt awaits an answer) /
+// 'waiting' (purple, quiet but no prompt detected) / 'done' (green) / 'none'
+export type TabAgentStatus = 'running' | 'attention' | 'waiting' | 'done' | 'none'
+
+// A numbered choice offered by an agent CLI select prompt (e.g. "❯ 1. Yes / 2. No").
+// Extracted in main.ts only while the tab is waiting for input; empty otherwise.
+export interface PromptChoice {
+  num: string
+  label: string
 }
 
 export interface TabInfo {
@@ -34,6 +48,8 @@ export interface TabInfo {
   isResuming: boolean
   model: string | null
   activeAgents: ActiveAgent[]
+  agentStatus: TabAgentStatus
+  promptChoices: PromptChoice[]
 }
 
 export interface SavedSession {
@@ -46,8 +62,9 @@ export interface ElectronAPI {
   closeTerminal: (tabId: string) => void
   onTerminalData: (callback: (tabId: string, data: string) => void) => () => void
   sendTerminalInput: (tabId: string, data: string) => void
+  sendChoice: (tabId: string, num: string) => Promise<void>
   resizeTerminal: (tabId: string, cols: number, rows: number) => void
-  getTerminalTitle: (tabId: string) => Promise<{ issue: string; detail: string; model: string | null; activeAgents: ActiveAgent[] }>
+  getTerminalTitle: (tabId: string) => Promise<{ issue: string; detail: string; model: string | null; activeAgents: ActiveAgent[]; agentStatus: TabAgentStatus; promptChoices: PromptChoice[] }>
   setTerminalIssue: (tabId: string, issue: string) => Promise<void>
   listTerminalInfo: () => Promise<TabInfo[]>
   getTabHasClaude: (tabId: string) => Promise<boolean>

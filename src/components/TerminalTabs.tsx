@@ -8,11 +8,25 @@ export interface TerminalTabsHandle {
   resumeSession: (sessionId: string) => void
 }
 
-// In-tab worker agent reported via [[AGENT: label :: model :: started|done]] markers
+// In-tab worker agent reported via [[AGENT: label :: model :: started|done]] markers.
+// done entries linger for a short window (doneAt, main.ts) so completion stays visible.
 interface ActiveAgent {
   label: string
   model: string
   status: 'started' | 'done'
+  doneAt?: number
+}
+
+// Aggregate per-tab agent status computed in main.ts (tab-bar color coding):
+// 'running' (blue) / 'attention' (yellow blinking, a select prompt awaits an answer) /
+// 'waiting' (purple, quiet but no prompt detected) / 'done' (green) / 'none'
+type TabAgentStatus = 'running' | 'attention' | 'waiting' | 'done' | 'none'
+
+// A numbered choice offered by an agent CLI select prompt (e.g. "❯ 1. Yes / 2. No").
+// Extracted in main.ts only while the tab is waiting for input; empty otherwise.
+interface PromptChoice {
+  num: string
+  label: string
 }
 
 interface Tab {
@@ -23,6 +37,8 @@ interface Tab {
   resuming: boolean
   model: string | null
   activeAgents: ActiveAgent[]
+  agentStatus: TabAgentStatus
+  promptChoices: PromptChoice[]
 }
 
 interface ClosedEntry {
@@ -145,6 +161,8 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
           resuming: willResume,
           model: saved.hadClaude ? saved.model ?? null : null,
           activeAgents: [],
+          agentStatus: 'none',
+          promptChoices: [],
         })
       }
       setTabs(restored)
@@ -192,7 +210,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       window.electronAPI.listTerminalInfo().then((infos) => {
         const resumingSet = new Set(infos.filter((i) => i.isResuming).map((i) => i.id))
         for (const tab of tabsRef.current) {
-          window.electronAPI.getTerminalTitle(tab.id).then(({ issue, detail, model, activeAgents }) => {
+          window.electronAPI.getTerminalTitle(tab.id).then(({ issue, detail, model, activeAgents, agentStatus, promptChoices }) => {
             setTabs((current) =>
               current.map((t) => {
                 if (t.id !== tab.id) return t
@@ -200,9 +218,12 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
                 const newIssue = t.customIssue ? t.issue : issue
                 const newDetail = stillResuming ? 'Resuming...' : detail
                 const agents = activeAgents ?? []
+                const newStatus = agentStatus ?? 'none'
+                const choices = promptChoices ?? []
                 const agentsChanged = JSON.stringify(agents) !== JSON.stringify(t.activeAgents)
-                if (newIssue === t.issue && newDetail === t.detail && stillResuming === t.resuming && model === t.model && !agentsChanged) return t
-                return { ...t, issue: newIssue, detail: newDetail, resuming: stillResuming, model, activeAgents: agents }
+                const choicesChanged = JSON.stringify(choices) !== JSON.stringify(t.promptChoices)
+                if (newIssue === t.issue && newDetail === t.detail && stillResuming === t.resuming && model === t.model && !agentsChanged && newStatus === t.agentStatus && !choicesChanged) return t
+                return { ...t, issue: newIssue, detail: newDetail, resuming: stillResuming, model, activeAgents: agents, agentStatus: newStatus, promptChoices: choices }
               })
             )
           })
@@ -359,7 +380,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     const tabId = await window.electronAPI.createTerminal()
     setTabs((prev) => [
       ...prev,
-      { id: tabId, issue: '', detail: 'Terminal', customIssue: false, resuming: false, model: null, activeAgents: [] },
+      { id: tabId, issue: '', detail: 'Terminal', customIssue: false, resuming: false, model: null, activeAgents: [], agentStatus: 'none', promptChoices: [] },
     ])
     onActiveTabChange(tabId)
     if (agent !== 'terminal') {
@@ -384,7 +405,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       const tabId = await window.electronAPI.createTerminal(undefined, sessionId)
       setTabs((prev) => [
         ...prev,
-        { id: tabId, issue: '', detail: 'Terminal', customIssue: false, resuming: true, model: null, activeAgents: [] },
+        { id: tabId, issue: '', detail: 'Terminal', customIssue: false, resuming: true, model: null, activeAgents: [], agentStatus: 'none', promptChoices: [] },
       ])
       onActiveTabChange(tabId)
       setTimeout(() => {
@@ -438,7 +459,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       }
       setTabs((prev) => [
         ...prev,
-        { id: tabId, issue: entry.issue, detail: '', customIssue: !!entry.issue, resuming: false, model: entry.agent === 'claude' ? entry.model : null, activeAgents: [] },
+        { id: tabId, issue: entry.issue, detail: '', customIssue: !!entry.issue, resuming: false, model: entry.agent === 'claude' ? entry.model : null, activeAgents: [], agentStatus: 'none', promptChoices: [] },
       ])
       onActiveTabChange(tabId)
       setTimeout(() => {
@@ -620,7 +641,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       key={tab.id}
       data-tab-idx={idx}
       data-tab-id={tab.id}
-      className={`tab ${tab.id === activeTabId ? 'tab-active' : ''} ${tab.id !== activeTabId && (tab.id === panes[0] || tab.id === panes[1]) ? 'tab-in-pane' : ''} ${tab.issue ? 'tab-two-line' : ''} ${dragOverIdx === idx && dragSrcIdxState !== idx ? 'tab-drag-over' : ''} ${dragSrcIdxState === idx ? 'tab-dragging' : ''}`}
+      className={`tab ${tab.id === activeTabId ? 'tab-active' : ''} ${tab.id !== activeTabId && (tab.id === panes[0] || tab.id === panes[1]) ? 'tab-in-pane' : ''} ${tab.issue ? 'tab-two-line' : ''} ${tab.agentStatus !== 'none' ? `tab-status-${tab.agentStatus}` : ''} ${dragOverIdx === idx && dragSrcIdxState !== idx ? 'tab-drag-over' : ''} ${dragSrcIdxState === idx ? 'tab-dragging' : ''}`}
       onMouseDown={(e) => handleTabMouseDown(e, idx)}
       onClick={() => onActiveTabChange(tab.id)}
       onDoubleClick={() => startEditing(tab.id, tab.issue)}
@@ -648,6 +669,31 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
           {tab.issue && <span className="tab-issue">{tab.issue}</span>}
           <span className={`tab-detail ${tab.resuming ? 'tab-detail-resuming' : ''}`}>{tab.detail}</span>
         </div>
+      )}
+      {/* Quick-answer chips: number buttons for a detected select prompt on an attention tab
+          (main.ts only reports 'attention' when choices were detected).
+          Clicking sends "<num>\r" to the tab's PTY without switching to it. */}
+      {editingTabId !== tab.id && tab.agentStatus === 'attention' && tab.promptChoices.length > 0 && (
+        <span className="tab-choice-chips" onMouseDown={(e) => e.stopPropagation()}>
+          {tab.promptChoices.map((c) => (
+            <button
+              key={c.num}
+              className="tab-choice-chip"
+              title={`${c.num}. ${c.label}`}
+              onClick={(e) => {
+                e.stopPropagation()
+                // sendChoice (not sendTerminalInput) so main records lastChoiceSentAt
+                // and suppresses stale chips left over from the answered dialog
+                window.electronAPI.sendChoice(tab.id, c.num)
+                // Optimistically clear the chips: the next poll re-adds them if the prompt persists
+                setTabs((current) => current.map((t) => (t.id === tab.id ? { ...t, promptChoices: [] } : t)))
+              }}
+              onDoubleClick={(e) => e.stopPropagation()}
+            >
+              {c.num}
+            </button>
+          ))}
+        </span>
       )}
       {editingTabId !== tab.id && (() => {
         const badge = getModelBadge(tab.model)
@@ -692,6 +738,11 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
                 ) : (
                   agents.map((a) => {
                     const ab = getModelBadge(a.model)
+                    // Per-agent status: done → 完了(green); started → 実行中(blue),
+                    // or 要対応(yellow) / 入力待ち(purple) when the tab itself is
+                    // attention (prompt detected) / waiting (just quiet)
+                    const st: TabAgentStatus = a.status === 'done' ? 'done' : tab.agentStatus === 'attention' || tab.agentStatus === 'waiting' ? tab.agentStatus : 'running'
+                    const stLabel = st === 'done' ? '完了' : st === 'attention' ? '要対応' : st === 'waiting' ? '入力待ち' : '実行中'
                     return (
                       <div key={a.label} className="tab-agent-popover-item">
                         <span className="tab-model-dot" style={{ background: ab?.color ?? 'var(--text-muted)' }} />
@@ -703,7 +754,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
                           {ab?.letter ?? '?'}
                         </span>
                         <span className="tab-agent-popover-label">{a.label}</span>
-                        <span className="tab-agent-popover-status">{a.status === 'started' ? '実行中' : '完了'}</span>
+                        <span className={`tab-agent-popover-status tab-agent-popover-status-${st}`}>{stLabel}</span>
                       </div>
                     )
                   })

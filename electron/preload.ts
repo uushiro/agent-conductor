@@ -19,20 +19,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   sendTerminalInput: (tabId: string, data: string) => {
     ipcRenderer.send('terminal:input', tabId, data)
   },
+  sendChoice: (tabId: string, num: string) =>
+    ipcRenderer.invoke('terminal:send-choice', tabId, num) as Promise<void>,
   resizeTerminal: (tabId: string, cols: number, rows: number) => {
     ipcRenderer.send('terminal:resize', tabId, cols, rows)
   },
 
   // Tab title (poll) + issue rename
   getTerminalTitle: (tabId: string) =>
-    ipcRenderer.invoke('terminal:get-title', tabId) as Promise<{ issue: string; detail: string; model: string | null; activeAgents: Array<{ label: string; model: string; status: 'started' | 'done' }> }>,
+    ipcRenderer.invoke('terminal:get-title', tabId) as Promise<{ issue: string; detail: string; model: string | null; activeAgents: Array<{ label: string; model: string; status: 'started' | 'done'; doneAt?: number }>; agentStatus: 'running' | 'attention' | 'waiting' | 'done' | 'none'; promptChoices: Array<{ num: string; label: string }> }>,
   setTerminalIssue: (tabId: string, issue: string) =>
     ipcRenderer.invoke('terminal:set-issue', tabId, issue),
 
   // Tab info (for sidebar)
   listTerminalInfo: () =>
     ipcRenderer.invoke('terminal:list-info') as Promise<
-      Array<{ id: string; cwd: string; proc: string; issue: string; latestInput: string; claudeSessionId: string | null; lastOutput: string; active: boolean; model: string | null; activeAgents: Array<{ label: string; model: string; status: 'started' | 'done' }> }>
+      Array<{ id: string; cwd: string; proc: string; issue: string; latestInput: string; claudeSessionId: string | null; lastOutput: string; active: boolean; model: string | null; activeAgents: Array<{ label: string; model: string; status: 'started' | 'done'; doneAt?: number }>; agentStatus: 'running' | 'attention' | 'waiting' | 'done' | 'none'; promptChoices: Array<{ num: string; label: string }> }>
     >,
 
   // Close confirmation + restore history

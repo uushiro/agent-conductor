@@ -29,7 +29,14 @@ const ptyProcesses = new Map<string, ReturnType<typeof pty.spawn>>()
 const tabTimers = new Map<string, ReturnType<typeof setInterval>>()
 // In-tab worker agents reported via [[AGENT: label :: model :: started|done]] markers.
 // Runtime-only (not persisted to session.json) — cleared on tab close / app restart.
-interface ActiveAgent { label: string; model: string; status: 'started' | 'done' }
+// `done` entries linger (doneAt + AGENT_DONE_LINGER_MS) so the 完了(green) state is
+// visible for a while instead of vanishing instantly; pruned lazily on IPC polls.
+interface ActiveAgent { label: string; model: string; status: 'started' | 'done'; doneAt?: number }
+
+// Aggregate per-tab agent status for the tab-bar color coding:
+// 'running' (blue) / 'attention' (yellow blinking, a select prompt awaits an answer) /
+// 'waiting' (purple, quiet but no prompt detected) / 'done' (green) / 'none'
+type TabAgentStatus = 'running' | 'attention' | 'waiting' | 'done' | 'none'
 
 const tabInfo = new Map<string, {
   cwd: string; proc: string; issue: string; latestInput: string
@@ -37,6 +44,9 @@ const tabInfo = new Map<string, {
   hadGemini: boolean; geminiSessionFile: string | null; hadCodex: boolean; resuming: boolean
   model: string | null
   activeAgents: ActiveAgent[]
+  // Timestamp of the last quick-answer chip send ('terminal:send-choice').
+  // Used to suppress stale prompt chips until new PTY output arrives.
+  lastChoiceSentAt?: number
 }>()
 
 // Normalize a model string to a known Claude model family (for the tab badge).
@@ -113,11 +123,50 @@ const tabResumeWatch = new Map<string, ReturnType<typeof setTimeout>>()
 const tabAgentMarkerSeen = new Map<string, Map<string, number>>() // tabId → (marker key → last seen ms)
 const AGENT_MARKER_DEDUP_TTL_MS = 5000
 const AGENT_MARKER_DEDUP_MAX_PER_TAB = 200
+// How long a `done` agent entry stays visible (完了/green) before being pruned
+const AGENT_DONE_LINGER_MS = 8000
+
+// Drop `done` entries whose linger window has expired. Called lazily from the
+// polling IPC handlers (get-title / list-info) — no per-entry timers needed.
+function pruneDoneAgents(info: { activeAgents: ActiveAgent[] }) {
+  const now = Date.now()
+  const kept = info.activeAgents.filter(
+    (a) => a.status !== 'done' || now - (a.doneAt ?? 0) < AGENT_DONE_LINGER_MS
+  )
+  if (kept.length !== info.activeAgents.length) info.activeAgents = kept
+}
+
+// Compute the tab's aggregate agent status (see TabAgentStatus).
+// The silent-tab approximation (agent CLI in the foreground but the PTY quiet for
+// > 3 s) splits in two: 'attention' when extractPromptChoices actually detects a
+// select prompt (a human answer is needed now), 'waiting' otherwise (just quiet,
+// no urgent action). Lingering `done` workers show 'done' only once nothing is running.
+function computeTabAgentStatus(id: string): TabAgentStatus {
+  const info = tabInfo.get(id)
+  if (!info) return 'none'
+  // Prune before the isAgentTab early-return: a tab that has left agent mode
+  // (back to a plain shell) must still expire its lingering `done` entries,
+  // or they would stay in activeAgents indefinitely.
+  pruneDoneAgents(info)
+  if (!isAgentTab(info)) return 'none'
+  const active = Date.now() - (tabLastOutputAt.get(id) ?? 0) < 3000
+  if (active) return 'running'
+  const hasStarted = info.activeAgents.some((a) => a.status === 'started')
+  const hasDone = info.activeAgents.some((a) => a.status === 'done')
+  if (hasDone && !hasStarted) return 'done'
+  // Waiting-equivalent: promote to 'attention' only when a live (non-stale) select
+  // prompt is actually on screen — the same guard that gates the quick-answer chips,
+  // so chips appear exactly in the 'attention' state.
+  if (!isPromptChoicesStale(id) && extractPromptChoices(tabLastOutput.get(id) || '').length > 0) return 'attention'
+  return 'waiting'
+}
 
 // Handle a detected [[AGENT: label :: model :: status]] marker from tab `tabId`.
-// started → upsert into activeAgents (by label); done → remove the entry.
-// Idempotent per state: duplicate started upserts / done removals are harmless, so a
-// marker slipping through dedup (or arriving via both OSC and plain-text paths) is safe.
+// started → upsert into activeAgents (by label); done → mark the entry done (kept for
+// AGENT_DONE_LINGER_MS so the green 完了 state is visible, then pruned lazily).
+// Idempotent per state: duplicate started upserts / done marks are harmless, so a
+// marker slipping through dedup is safe. Called only from the OSC 777 path
+// (the plain-text fallback has been removed).
 function handleAgentMarker(tabId: string, label: string, model: string, status: 'started' | 'done') {
   const key = `${label}::${model}::${status}`
   let seen = tabAgentMarkerSeen.get(tabId)
@@ -133,21 +182,30 @@ function handleAgentMarker(tabId: string, label: string, model: string, status: 
 
   const info = tabInfo.get(tabId)
   if (!info) return
+  // Keep the " (継承)" suffix (hook-resolved inherited parent model) so the
+  // popover can distinguish inherited models; the renderer strips it for
+  // badge lookup.
+  const base = normalizeClaudeModel(model)
+  const normalized = base ? (model.includes('継承') ? `${base} (継承)` : base) : model
   if (status === 'started') {
-    // Keep the " (継承)" suffix (hook-resolved inherited parent model) so the
-    // popover can distinguish inherited models; the renderer strips it for
-    // badge lookup.
-    const base = normalizeClaudeModel(model)
-    const normalized = base ? (model.includes('継承') ? `${base} (継承)` : base) : model
     const existing = info.activeAgents.find((a) => a.label === label)
     if (existing) {
       existing.model = normalized
       existing.status = 'started'
+      existing.doneAt = undefined
     } else {
       info.activeAgents.push({ label, model: normalized, status: 'started' })
     }
   } else {
-    info.activeAgents = info.activeAgents.filter((a) => a.label !== label)
+    // Mark done (upsert: a done without a seen started still shows as 完了).
+    // The entry lingers for AGENT_DONE_LINGER_MS and is pruned on IPC polls.
+    const existing = info.activeAgents.find((a) => a.label === label)
+    if (existing) {
+      existing.status = 'done'
+      existing.doneAt = now
+    } else {
+      info.activeAgents.push({ label, model: normalized, status: 'done', doneAt: now })
+    }
     // Clear the label's `started` dedup records so relaunching the same label
     // right away is not swallowed by the TTL window.
     const prefix = `${label}::`
@@ -379,6 +437,80 @@ function extractLastLine(raw: string): string {
     .filter((l) => !/^yuushirokawa@/.test(l))         // filter shell prompt lines
 
   return lines[lines.length - 1] || ''
+}
+
+// --- Selectable prompt choices (quick-answer chips on waiting tabs) ---
+// A numbered choice offered by an agent CLI select prompt (e.g. "❯ 1. Yes / 2. No")
+interface PromptChoice {
+  num: string
+  label: string
+}
+
+const PROMPT_CHOICES_MAX = 10
+// One choice line, after stripping box-drawing borders:
+//   [│] [❯] <num>[.)] <label> [│]
+// Captures: 1 = box border prefix, 2 = indent before the number, 3 = caret, 4 = number, 5 = label
+const PROMPT_CHOICE_LINE_RE = /^(\s*│)?( *)(❯\s*)?(\d{1,2})[.)]\s+(.+?)\s*│?\s*$/
+
+// Extract the numbered choices of a select prompt (e.g. Claude Code's permission
+// dialog / AskUserQuestion: "❯ 1. Yes\n  2. No, and tell Claude what to do differently")
+// from a tab's raw PTY buffer. Returns [] when no prompt is detected.
+//
+// False-positive guards (all must hold — plain numbered lists in code/output must NOT match):
+// - computeTabAgentStatus only invokes this for tabs that are otherwise 'waiting'
+//   (agent tab, > 3 s silent); detection promotes the status to 'attention'
+// - each line must carry a ❯ caret or ≥2 spaces of indent before the number
+// - numbers must be consecutive starting at 1, block size 2..PROMPT_CHOICES_MAX
+// - at least one line in the block must have the ❯ caret (the TUI selection cursor)
+// TUI repaints leave the same block in the buffer multiple times → last block wins.
+function extractPromptChoices(rawBuffer: string): PromptChoice[] {
+  const stripped = rawBuffer
+    .replace(/\x1b\][^\x07\x1b]*\x07/g, '')          // OSC sequences (e.g. ]0;title BEL)
+    .replace(/\x1b\][^\x1b]*\x1b\\/g, '')             // OSC sequences (ST terminated)
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')           // CSI sequences
+    .replace(/\x1b[a-zA-Z]/g, '')                     // simple escape sequences
+    .replace(/\r/g, '')
+
+  const lines = stripped.split('\n')
+  // Parse every line into a choice candidate (or null), preserving line positions
+  const parsed = lines.map((line) => {
+    const m = line.match(PROMPT_CHOICE_LINE_RE)
+    if (!m) return null
+    const hasCaret = !!m[3]
+    const indented = (m[2] ?? '').length >= 2
+    if (!hasCaret && !indented) return null // bare "1. foo" at column 0 → likely a plain list
+    const label = m[5].trim()
+    if (!label) return null
+    return { num: m[4], label, hasCaret }
+  })
+
+  // Collect contiguous runs of choice lines, keep the LAST valid block
+  let best: PromptChoice[] = []
+  let run: { num: string; label: string; hasCaret: boolean }[] = []
+  const flush = () => {
+    if (run.length >= 2 && run.length <= PROMPT_CHOICES_MAX &&
+        run.some((c) => c.hasCaret) &&
+        run.every((c, i) => Number(c.num) === i + 1)) {
+      best = run.map(({ num, label }) => ({ num, label }))
+    }
+    run = []
+  }
+  for (const p of parsed) {
+    if (p) run.push(p)
+    else flush()
+  }
+  flush()
+  return best
+}
+
+// Stale-prompt guard for quick-answer chips: tabLastOutput is a raw tail buffer, so an
+// already-answered dialog can linger there (if fewer than the buffer window of output
+// followed the answer). If no new PTY output has arrived since the last chip send,
+// whatever extractPromptChoices finds is the old, answered prompt — suppress it.
+function isPromptChoicesStale(tabId: string): boolean {
+  const sentAt = tabInfo.get(tabId)?.lastChoiceSentAt
+  if (sentAt === undefined) return false
+  return (tabLastOutputAt.get(tabId) ?? 0) <= sentAt
 }
 // Ordered list of tab IDs to preserve tab order
 const tabOrder: string[] = []
@@ -1044,8 +1176,12 @@ function createWindow() {
   // Get title for a tab (poll from renderer)
   ipcMain.handle('terminal:get-title', (_event, tabId: string) => {
     const info = tabInfo.get(tabId)
-    if (!info) return { issue: '', detail: 'Terminal', model: null, activeAgents: [] }
-    const result: { issue: string; detail: string; model: string | null; activeAgents: ActiveAgent[] } = { ...getTabTitle(info), model: info.model, activeAgents: info.activeAgents }
+    if (!info) return { issue: '', detail: 'Terminal', model: null, activeAgents: [], agentStatus: 'none' as TabAgentStatus, promptChoices: [] as PromptChoice[] }
+    const agentStatus = computeTabAgentStatus(tabId) // also prunes expired done entries
+    // Quick-answer chips: only scan the buffer for select-prompt choices while waiting for input
+    // 'attention' already implies non-stale detected choices (computeTabAgentStatus)
+    const promptChoices = agentStatus === 'attention' ? extractPromptChoices(tabLastOutput.get(tabId) || '') : []
+    const result: { issue: string; detail: string; model: string | null; activeAgents: ActiveAgent[]; agentStatus: TabAgentStatus; promptChoices: PromptChoice[] } = { ...getTabTitle(info), model: info.model, activeAgents: info.activeAgents, agentStatus, promptChoices }
     // If detail fell back to directory name (latestInput is empty), try to populate
     // from session file so resumed tabs show last response instead of "~"
     if (result.detail === shortDir(info.cwd)) {
@@ -1087,11 +1223,16 @@ function createWindow() {
         const lastInputAt = tabLastInputAt.get(id) ?? 0
         // "active" = PTY had output within the last 3 s (agent is generating)
         const active = (now - lastOutputAt) < 3000
-        const isClaudeRunning = !!info?.hadClaude && !!info?.proc && !SHELLS.has(info.proc)
-        const isGeminiRunning = !!info?.hadGemini && !!info?.proc && !SHELLS.has(info.proc)
-        const isCodexRunning = !!info?.hadCodex && !!info?.proc && !SHELLS.has(info.proc)
-        const isAgentRunning = isClaudeRunning || isGeminiRunning || isCodexRunning
+        const isAgentRunning = isAgentTab(info)
+        const isClaudeRunning = isAgentRunning && !!info?.hadClaude
+        const isGeminiRunning = isAgentRunning && !!info?.hadGemini
+        const isCodexRunning = isAgentRunning && !!info?.hadCodex
         const isThinking = isAgentRunning && active
+        // Compute (and prune expired done entries) BEFORE reading info.activeAgents below
+        const agentStatus = computeTabAgentStatus(id)
+        // Quick-answer chips: only scan the buffer for select-prompt choices while waiting for input
+        // 'attention' already implies non-stale detected choices (computeTabAgentStatus)
+        const promptChoices = agentStatus === 'attention' ? extractPromptChoices(tabLastOutput.get(id) || '') : []
 
         let lastOutput: string
         if (isAgentRunning && active) {
@@ -1118,7 +1259,7 @@ function createWindow() {
           lastOutput = extractLastLine(tabLastOutput.get(id) || '')
         }
 
-        if (!info) return { id, cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null, lastOutput: '', active, lastInputAt, isThinking: false, isResuming: false, model: null, activeAgents: [] }
+        if (!info) return { id, cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null, lastOutput: '', active, lastInputAt, isThinking: false, isResuming: false, model: null, activeAgents: [], agentStatus: 'none' as TabAgentStatus, promptChoices: [] as PromptChoice[] }
         return {
           id,
           cwd: info.cwd,
@@ -1133,6 +1274,8 @@ function createWindow() {
           isResuming: info.resuming,
           model: info.model,
           activeAgents: info.activeAgents,
+          agentStatus,
+          promptChoices,
         }
       })
       .sort((a, b) => b.lastInputAt - a.lastInputAt)
@@ -1371,6 +1514,20 @@ function createWindow() {
     } else if (parsed.length > 1 && !parsed.startsWith('\x1b')) {
       // Includes bracketed-paste content (markers stripped above)
       tabInputBuf.set(tabId, (tabInputBuf.get(tabId) || '') + parsed)
+    }
+  })
+
+  // Answer a select prompt via a quick-answer chip: write "<num>\r" to the PTY and
+  // record when it was sent, so stale (already-answered) prompt chips are suppressed
+  // until new output arrives (see isPromptChoicesStale)
+  ipcMain.handle('terminal:send-choice', (_event, tabId: string, num: string) => {
+    const proc = ptyProcesses.get(tabId)
+    if (!proc) return
+    proc.write(num + '\r')
+    const info = tabInfo.get(tabId)
+    if (info) {
+      info.lastChoiceSentAt = Date.now()
+      tabInfo.set(tabId, info)
     }
   })
 
