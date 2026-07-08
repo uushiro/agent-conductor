@@ -1145,7 +1145,8 @@ function createWindow() {
     minHeight: 500,
     title: 'Agent Conductor',
     titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 15, y: 15 },
+    // Vertically centered against the fixed tab bar (--titlebar-height: 40px)
+    trafficLightPosition: { x: 12, y: 14 },
     backgroundColor: '#0d1117',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

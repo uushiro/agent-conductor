@@ -18,7 +18,10 @@
   --accent-green: #3fb950;
   --accent-red: #f85149;
   --accent-yellow: #d29922;
-  --titlebar-height: 38px;
+  /* Height of the fixed tab bar pinned to the top of the window (Chrome-like:
+     tabs sit beside the macOS traffic lights). Keep in sync with
+     trafficLightPosition in electron/main.ts. */
+  --titlebar-height: 40px;
 }
 
 html, body, #root {
@@ -222,25 +225,31 @@ html, body, #root {
   overflow: hidden;
 }
 
-/* Tab bar */
+/* Tab bar — pinned to the very top of the window (Chrome-like), sharing the
+   row with the macOS traffic lights. The bar itself is the window drag region;
+   interactive children opt out with -webkit-app-region: no-drag. */
 .tab-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--titlebar-height);
+  z-index: 100;
   display: flex;
   align-items: stretch;
-  min-height: 36px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   user-select: none;
-  -webkit-app-region: no-drag;
-  flex-shrink: 0;
+  -webkit-app-region: drag;
 }
 
-/* Scrollable tabs area */
+/* Scrollable tabs area (left padding clears the traffic lights) */
 .tab-bar-tabs {
   display: flex;
   align-items: stretch;
   flex: 1;
   overflow-x: auto;
-  padding: 0 4px;
+  padding: 0 4px 0 78px;
   gap: 1px;
   min-width: 0;
 }
@@ -256,6 +265,7 @@ html, body, #root {
   flex-shrink: 0;
   padding: 0 4px;
   border-left: 1px solid var(--border);
+  -webkit-app-region: no-drag;
 }
 
 .tab {
@@ -272,6 +282,7 @@ html, body, #root {
   cursor: pointer;
   transition: background 0.1s, color 0.1s;
   margin-top: 4px;
+  -webkit-app-region: no-drag;
 }
 
 .tab-two-line {
@@ -432,6 +443,7 @@ html, body, #root {
   /* Fixed like .tab-context-menu: escapes the .tab-bar-tabs scroll container.
      left/top are set inline from the clicked tab's getBoundingClientRect(). */
   position: fixed;
+  -webkit-app-region: no-drag;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -599,6 +611,7 @@ html, body, #root {
   position: absolute;
   top: calc(100% + 4px);
   right: 0;
+  -webkit-app-region: no-drag;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -682,6 +695,7 @@ html, body, #root {
   position: absolute;
   top: calc(100% + 4px);
   right: 0;
+  -webkit-app-region: no-drag;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -892,6 +906,7 @@ html, body, #root {
   border-radius: 8px 8px 0 0;
   overflow: hidden;
   background: var(--bg-secondary);
+  -webkit-app-region: no-drag;
 }
 
 .tab-capsule .tab {
@@ -907,6 +922,7 @@ html, body, #root {
 /* Tab right-click context menu */
 .tab-context-menu {
   position: fixed;
+  -webkit-app-region: no-drag;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1046,7 +1062,9 @@ html, body, #root {
   to   { opacity: 1; transform: translate(-50%, -50%); }
 }
 
-/* Drag region for titlebar */
+/* Fallback drag region for when no tab bar is rendered (zero tabs).
+   Sits below .tab-bar (z-index 100); draggable-region computation subtracts
+   no-drag elements geometrically, so tab-bar interactions are unaffected. */
 .app::before {
   content: '';
   position: fixed;
@@ -1055,7 +1073,7 @@ html, body, #root {
   right: 0;
   height: var(--titlebar-height);
   -webkit-app-region: drag;
-  z-index: 100;
+  z-index: 99;
 }
 
 /* ---- File Tree Sidebar ---- */
