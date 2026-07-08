@@ -220,6 +220,15 @@ function resolveTabByName(name: string, excludeTabId: string): string | null {
   return null
 }
 
+// A tab counts as "AI agent running" when any agent (Claude/Gemini/Codex) was
+// launched in it and its foreground process has not returned to a plain shell.
+// SECURITY: SEND delivery must be gated on this — injecting into a plain shell
+// would execute the message body as a shell command.
+function isAgentTab(info: { proc: string; hadClaude: boolean; hadGemini: boolean; hadCodex: boolean } | undefined): boolean {
+  if (!info) return false
+  return (info.hadClaude || info.hadGemini || info.hadCodex) && info.proc !== '' && !SHELLS.has(info.proc)
+}
+
 // Inject a message into the destination PTY via bracketed paste.
 // SECURITY: does NOT auto-submit with \r. Auto-execution here would let a
 // prompt-injected [[SEND:]] block in one tab's output silently drive actions
@@ -304,6 +313,15 @@ function handleAgentSend(fromTabId: string, destName: string, body: string, opts
     })
     return
   }
+  // Reject delivery when the destination tab has no AI agent running: bracketed paste
+  // into a plain shell would let the message body run as a shell command.
+  if (!isAgentTab(tabInfo.get(toTabId))) {
+    console.log(`[agent-msg] 宛先タブはAIエージェント未実行のため送信を拒否: "${destName}" (from: ${fromName})`)
+    mainWindow?.webContents.send('agent-msg:notify', {
+      type: 'error', from: fromName, dest: destName, body,
+    })
+    return
+  }
   // Always enqueue; the 1s poller delivers when the destination is idle (FIFO per destination)
   agentMsgQueue.push({ fromTabId, fromName, toTabId, body, queuedAt: now })
 }
@@ -318,6 +336,18 @@ setInterval(() => {
     if (!ptyProcesses.has(msg.toTabId)) {
       console.log(`[agent-msg] 宛先タブが閉じられたため破棄: ${msg.toTabId}`)
       agentMsgQueue.splice(i, 1)
+      continue
+    }
+    // Re-check at delivery time (TOCTOU): the destination may have passed the
+    // isAgentTab gate at enqueue but returned to a plain shell while queued —
+    // delivering then would let the message body run as a shell command.
+    if (!isAgentTab(tabInfo.get(msg.toTabId))) {
+      const destName = tabInfo.get(msg.toTabId)?.issue || msg.toTabId
+      console.log(`[agent-msg] 宛先タブのAIエージェントが待機中に終了したため送信を取り消し: "${destName}" (from: ${msg.fromName})`)
+      agentMsgQueue.splice(i, 1)
+      mainWindow?.webContents.send('agent-msg:notify', {
+        type: 'error', from: msg.fromName, dest: destName, body: msg.body,
+      })
       continue
     }
     const lastOut = tabLastOutputAt.get(msg.toTabId) ?? 0
