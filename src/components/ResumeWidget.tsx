@@ -1,4 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+
+const POLL_INTERVAL_MS = 10000
 
 interface ResumeSession {
   id: string
@@ -33,9 +35,13 @@ export function ResumeWidget({ projectDirs, onResumeSession }: Props) {
   const [sessions, setSessions] = useState<ResumeSession[]>([])
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
+  const loadedOnceRef = useRef(false)
+  const inFlightRef = useRef(false)
 
-  const load = useCallback(async () => {
-    setLoading(true)
+  const load = useCallback(async (force = false) => {
+    if (inFlightRef.current) return
+    inFlightRef.current = true
+    if (!loadedOnceRef.current || force) setLoading(true)
     try {
       const result = await window.electronAPI.listResumeSessions(projectDirs.length > 0 ? projectDirs : null)
       setSessions(result)
@@ -43,11 +49,26 @@ export function ResumeWidget({ projectDirs, onResumeSession }: Props) {
       setSessions([])
     } finally {
       setLoading(false)
+      loadedOnceRef.current = true
+      inFlightRef.current = false
     }
   }, [projectDirs])
 
   useEffect(() => {
     load()
+
+    const interval = setInterval(() => {
+      if (document.hidden) return
+      load()
+    }, POLL_INTERVAL_MS)
+
+    const onFocus = () => load()
+    window.addEventListener('focus', onFocus)
+
+    return () => {
+      clearInterval(interval)
+      window.removeEventListener('focus', onFocus)
+    }
   }, [load])
 
   const filtered = query.trim()
@@ -64,6 +85,14 @@ export function ResumeWidget({ projectDirs, onResumeSession }: Props) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
+        <button
+          className="resume-refresh-btn"
+          onClick={() => load(true)}
+          title="Refresh"
+          aria-label="Refresh"
+        >
+          ⟳
+        </button>
       </div>
       <div className="resume-list">
         {loading && <div className="resume-empty">Loading...</div>}

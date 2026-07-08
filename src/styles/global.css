@@ -2045,6 +2045,20 @@ html, body, #root {
 .resume-search:focus {
   border-color: var(--accent);
 }
+.resume-refresh-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 3px 4px;
+  border-radius: 4px;
+}
+.resume-refresh-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary, #1c2128);
+}
 .resume-list {
   flex: 1;
   overflow-y: auto;
