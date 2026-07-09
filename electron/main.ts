@@ -34,9 +34,10 @@ const tabTimers = new Map<string, ReturnType<typeof setInterval>>()
 interface ActiveAgent { label: string; model: string; status: 'started' | 'done'; doneAt?: number }
 
 // Aggregate per-tab agent status for the tab-bar color coding:
+// 'error' (red blinking, critical API/auth error needs a human NOW) /
 // 'running' (blue) / 'attention' (yellow blinking, a select prompt awaits an answer) /
 // 'waiting' (purple, quiet but no prompt detected) / 'done' (green) / 'none'
-type TabAgentStatus = 'running' | 'attention' | 'waiting' | 'done' | 'none'
+type TabAgentStatus = 'error' | 'running' | 'attention' | 'waiting' | 'done' | 'none'
 
 const tabInfo = new Map<string, {
   cwd: string; proc: string; issue: string; latestInput: string
@@ -141,6 +142,8 @@ function pruneDoneAgents(info: { activeAgents: ActiveAgent[] }) {
 // > 3 s) splits in two: 'attention' when extractPromptChoices actually detects a
 // select prompt (a human answer is needed now), 'waiting' otherwise (just quiet,
 // no urgent action). Lingering `done` workers show 'done' only once nothing is running.
+// 'error' takes precedence over everything (checked even while output is flowing —
+// an error banner must turn the tab red immediately, without the 3 s silence wait).
 function computeTabAgentStatus(id: string): TabAgentStatus {
   const info = tabInfo.get(id)
   if (!info) return 'none'
@@ -149,6 +152,7 @@ function computeTabAgentStatus(id: string): TabAgentStatus {
   // or they would stay in activeAgents indefinitely.
   pruneDoneAgents(info)
   if (!isAgentTab(info)) return 'none'
+  if (extractCriticalError(tabLastOutput.get(id) || '')) return 'error'
   const active = Date.now() - (tabLastOutputAt.get(id) ?? 0) < 3000
   if (active) return 'running'
   const hasStarted = info.activeAgents.some((a) => a.status === 'started')
@@ -511,6 +515,136 @@ function isPromptChoicesStale(tabId: string): boolean {
   const sentAt = tabInfo.get(tabId)?.lastChoiceSentAt
   if (sentAt === undefined) return false
   return (tabLastOutputAt.get(tabId) ?? 0) <= sentAt
+}
+
+// --- Critical error detection (red blinking 'error' tab status) ---
+// Patterns that indicate the agent CLI hit an error a human must resolve NOW:
+// API failures (rate limit / overloaded) and auth failures (login required,
+// expired credentials). Matched per line, case-insensitively, against the
+// ANSI-stripped tail buffer. Bare status codes (401/403/429) are deliberately
+// NOT matched alone — only next to error context words — since 3-digit numbers
+// are everywhere in terminal output (line numbers, byte counts, ...).
+const CRITICAL_ERROR_PATTERNS: RegExp[] = [
+  // Claude Code TUI: "⎿  API Error: ..." / "API Error (overloaded)" etc.
+  /\bAPI\s+Error\b/i,
+  /APIエラー/,
+  /\brate.?limit(?:ed|s)?\b/i,
+  /\boverloaded_error\b/i,
+  // Status codes only with adjacent error context: "error ... 429", "429 Too Many Requests"
+  /(?:\berror\b|エラー)\D{0,20}\b(?:401|403|429)\b/i,
+  /\b(?:401\s+Unauthorized|403\s+Forbidden|429\s+Too\s+Many\s+Requests)\b/i,
+  // Auth / login required
+  /\bplease\s+run\s+\/login\b/i,
+  /\bplease\s+log\s?in\b/i,
+  /ログインしてください/,
+  /認証(?:エラー|に失敗|が切れ)/,
+  /\binvalid\s+api\s+key\b/i,
+  /\bre-?authenticate\b/i,
+  /\bauthentication[_\s]+(?:error|failed)\b/i,
+  /\bOAuth\s+token\s+(?:has\s+)?(?:expired|revoked)\b/i,
+]
+// Heuristic guard against matching keywords inside *displayed source code*
+// (e.g. an agent reading `console.log('API Error handling')` echoes it to the
+// terminal). Skips lines that look like code: comment markers, log calls,
+// arrow functions, or a trailing string-literal argument. Not airtight — just
+// cheap coverage of the common echo shapes.
+const CODE_LIKE_LINE_RE = /(?:\/\/|\/\*|\bconsole\.\w+\(|\blogger?\.\w+\(|\bthrow\s+new\b|=>\s|['"`][^'"`]*['"`]\s*[,)];?\s*$)/
+// Markdown prose shapes (headings, bullets, numbered lists, quotes): an agent
+// documenting error handling echoes these; a TUI error banner never does.
+const MARKDOWN_LINE_RE = /^\s*(?:#{1,6}\s|[-*•]\s|\d+[.)]\s|>\s)/
+// Diff output (git diff / git log -p): removed lines are rendered red, so a
+// deleted line that happens to contain "rate limit" etc. would pass the
+// red-SGR tier. Any line starting with the diff marker `-` (or `+`, for
+// symmetry) is displayed source, never an error banner — skip it outright.
+const DIFF_LINE_RE = /^[+-]/
+// Explanatory / hypothetical sentence markers (「〜の場合」, "avoid", "must", ...):
+// prose ABOUT errors, not an error itself.
+const EXPLANATORY_PROSE_RE = /の場合|する(?:場合|には|とき)|した(?:場合|とき|時)|対処法|対策|については|ようにし|\bavoid\b|\bmust\b|\bshould\b|\bin\s+order\s+to\b|\bif\b|\bwhen\b/i
+// A real error banner starts with the error text itself, optionally preceded by
+// TUI decoration (⎿, ✗, !) or an "Error:" label — never by a sentence subject
+// (「ユーザーは再度ログインしてください」). Applied to the text before the match.
+const BANNER_PREFIX_RE = /^(?:[\s⎿✗✘×•·!⚠️[\]()]+|error[:：\s]+|エラー[:：\s]*)*$/i
+// Fallback-tier whitelist (no color info): the text at the match must itself be
+// a formulaic error banner ("API Error: <reason>", "Please run /login", ...).
+// A prefix match alone lets prose that merely *starts* with a keyword through
+// (「APIエラーを直して」, "API Errorは発生していませんでした"), so each shape is
+// anchored to the exact banner grammar the CLIs emit.
+const BANNER_SHAPE_RES: RegExp[] = [
+  /^(?:API\s+)?Error\b\s*(?:[:：]\s*|\()\S/i,      // "API Error: reason" / "API Error (429 ...)"
+  /^APIエラー(?:[:：]|が発生)/,
+  /^rate.?limit(?:ed|s)?(?:\s+(?:exceeded|reached|hit))?\.?$/i,
+  /^overloaded_error\b/i,
+  /^(?:401\s+Unauthorized|403\s+Forbidden|429\s+Too\s+Many\s+Requests)\b/i,
+  /^Please\s+(?:run\s+)?\/?log\s?in\b/i,
+  /^Invalid\s+API\s+key\b/i,
+  /^(?:再度)?ログインしてください/,
+  /^認証(?:エラー|に失敗|が切れ)/,
+  /^re-?authenticate\b/i,
+  /^authentication[_\s]+(?:error|failed)\b/i,
+  /^OAuth\s+token\b/i,
+]
+// SGR sequences that render red: basic/bright fg+bg (31/91/41/101) and the red
+// band of the 256-color palette (1, 9, 52, 88, 124-125, 160-161, 196-204).
+const RED_SGR_RE = /\x1b\[(?:[0-9;]*;)?(?:31|91|41|101|[34]8;5;(?:52|88|12[45]|16[01]|19[6-9]|20[0-4]|[19]))(?:;[0-9;]*)?m/
+const TRUECOLOR_SGR_RE = /\x1b\[[0-9;]*[34]8;2;(\d{1,3});(\d{1,3});(\d{1,3})/g
+
+// True when a raw (ANSI-included) line carries a red-ish SGR color — the shape
+// Claude Code / Gemini / Codex TUIs actually use to render error banners. Prose
+// merely *mentioning* errors is never colored red, so this is the strongest
+// false-positive filter available.
+function lineHasRedAnsi(rawLine: string): boolean {
+  if (RED_SGR_RE.test(rawLine)) return true
+  TRUECOLOR_SGR_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = TRUECOLOR_SGR_RE.exec(rawLine))) {
+    const r = Number(m[1]), g = Number(m[2]), b = Number(m[3])
+    if (r >= 150 && g <= r * 0.6 && b <= r * 0.6) return true
+  }
+  return false
+}
+
+function stripAnsi(s: string): string {
+  return s
+    .replace(/\x1b\][^\x07\x1b]*\x07/g, '')          // OSC sequences (e.g. ]0;title BEL)
+    .replace(/\x1b\][^\x1b]*\x1b\\/g, '')             // OSC sequences (ST terminated)
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')           // CSI sequences
+    .replace(/\x1b[a-zA-Z]/g, '')                     // simple escape sequences
+}
+
+// True when the tab's recent output contains a critical error banner (API error /
+// auth failure). Operates on tabLastOutput, which is already a ~3000-char tail —
+// so a stale error naturally scrolls out of detection as new output arrives.
+// Two-tier check per line to avoid false positives on prose that merely talks
+// about errors ("## APIエラー時の対処法", "please log in again if ..."):
+//   1. Primary: the line matches a critical pattern AND is rendered with a red
+//      SGR color in the raw buffer.
+//   2. Fallback (terminal emitted no color info): only accept short (≤60 chars),
+//      banner-shaped lines — not markdown, not explanatory prose, nothing but
+//      decoration / an "Error:" label before the matched text, and the matched
+//      text itself must fit a formulaic banner shape (BANNER_SHAPE_RES).
+// Diff lines (`-`/`+` markers) are excluded before either tier: git renders
+// removed lines red, which would otherwise satisfy the primary tier.
+function extractCriticalError(rawBuffer: string): boolean {
+  for (const rawLine of rawBuffer.split(/\r\n|[\r\n]/)) {
+    const line = stripAnsi(rawLine)
+    if (DIFF_LINE_RE.test(line)) continue
+    if (CODE_LIKE_LINE_RE.test(line)) continue
+    let matchIndex = -1
+    for (const re of CRITICAL_ERROR_PATTERNS) {
+      const m = re.exec(line)
+      if (m && (matchIndex === -1 || m.index < matchIndex)) matchIndex = m.index
+    }
+    if (matchIndex === -1) continue
+    if (lineHasRedAnsi(rawLine)) return true
+    if (line.trim().length > 60) continue
+    if (MARKDOWN_LINE_RE.test(line)) continue
+    if (EXPLANATORY_PROSE_RE.test(line)) continue
+    if (!BANNER_PREFIX_RE.test(line.slice(0, matchIndex))) continue
+    const matchedText = line.slice(matchIndex).trim()
+    if (!BANNER_SHAPE_RES.some((re) => re.test(matchedText))) continue
+    return true
+  }
+  return false
 }
 // Ordered list of tab IDs to preserve tab order
 const tabOrder: string[] = []

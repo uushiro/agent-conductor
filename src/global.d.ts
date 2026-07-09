@@ -23,9 +23,10 @@ export interface ActiveAgent {
 }
 
 // Aggregate per-tab agent status (tab-bar color coding):
+// 'error' (red blinking, critical API/auth error needs a human NOW) /
 // 'running' (blue) / 'attention' (yellow blinking, a select prompt awaits an answer) /
 // 'waiting' (purple, quiet but no prompt detected) / 'done' (green) / 'none'
-export type TabAgentStatus = 'running' | 'attention' | 'waiting' | 'done' | 'none'
+export type TabAgentStatus = 'error' | 'running' | 'attention' | 'waiting' | 'done' | 'none'
 
 // A numbered choice offered by an agent CLI select prompt (e.g. "❯ 1. Yes / 2. No").
 // Extracted in main.ts only while the tab is waiting for input; empty otherwise.

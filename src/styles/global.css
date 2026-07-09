@@ -340,11 +340,24 @@ html, body, #root {
 }
 
 /* Tab aggregate agent status (agentStatus from main.ts):
-   blue = running / blinking yellow = attention (select prompt needs an answer) /
-   purple = waiting (quiet, no prompt) / green = done (lingers ~8s).
+   blinking red = error (critical API/auth error, human needed NOW) /
+   purple = running / blinking yellow = attention (select prompt needs an answer) /
+   blue = waiting (quiet, no prompt) / green = done (lingers ~8s) / white = none (no agent).
    Shown as a colored top bar on the tab (background is left to .tab / .tab-active). */
+.tab-status-error {
+  box-shadow: inset 0 2px 0 #f85149;
+  animation: error-blink 1.5s ease-in-out infinite;
+}
+
+/* Slow blink for the error top bar — same rhythm as attention-blink,
+   red (#f85149 = rgb(248, 81, 73), GitHub danger) */
+@keyframes error-blink {
+  0%, 100% { box-shadow: inset 0 2px 0 #f85149; }
+  50% { box-shadow: inset 0 2px 0 rgba(248, 81, 73, 0.25); }
+}
+
 .tab-status-running {
-  box-shadow: inset 0 2px 0 #58a6ff;
+  box-shadow: inset 0 2px 0 #bc8cff;
 }
 
 .tab-status-attention {
@@ -359,11 +372,15 @@ html, body, #root {
 }
 
 .tab-status-waiting {
-  box-shadow: inset 0 2px 0 #bc8cff;
+  box-shadow: inset 0 2px 0 #58a6ff;
 }
 
 .tab-status-done {
   box-shadow: inset 0 2px 0 #3fb950;
+}
+
+.tab-status-none {
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.25);
 }
 
 /* Quick-answer chips: number buttons shown on an attention tab when a select prompt
@@ -486,8 +503,13 @@ html, body, #root {
 }
 
 /* Popover status colors (matches the tab-status-* top bar colors) */
+.tab-agent-popover-status-error {
+  color: #f85149;
+  animation: attention-blink-text 1.5s ease-in-out infinite;
+}
+
 .tab-agent-popover-status-running {
-  color: #58a6ff;
+  color: #bc8cff;
 }
 
 .tab-agent-popover-status-attention {
@@ -502,7 +524,7 @@ html, body, #root {
 }
 
 .tab-agent-popover-status-waiting {
-  color: #bc8cff;
+  color: #58a6ff;
 }
 
 .tab-agent-popover-status-done {

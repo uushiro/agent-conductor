@@ -18,9 +18,10 @@ interface ActiveAgent {
 }
 
 // Aggregate per-tab agent status computed in main.ts (tab-bar color coding):
+// 'error' (red blinking, critical API/auth error needs a human NOW) /
 // 'running' (blue) / 'attention' (yellow blinking, a select prompt awaits an answer) /
 // 'waiting' (purple, quiet but no prompt detected) / 'done' (green) / 'none'
-type TabAgentStatus = 'running' | 'attention' | 'waiting' | 'done' | 'none'
+type TabAgentStatus = 'error' | 'running' | 'attention' | 'waiting' | 'done' | 'none'
 
 // A numbered choice offered by an agent CLI select prompt (e.g. "❯ 1. Yes / 2. No").
 // Extracted in main.ts only while the tab is waiting for input; empty otherwise.
@@ -684,7 +685,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       key={tab.id}
       data-tab-idx={idx}
       data-tab-id={tab.id}
-      className={`tab ${tab.id === activeTabId ? 'tab-active' : ''} ${tab.id !== activeTabId && (tab.id === panes[0] || tab.id === panes[1]) ? 'tab-in-pane' : ''} ${tab.issue ? 'tab-two-line' : ''} ${tab.agentStatus !== 'none' ? `tab-status-${tab.agentStatus}` : ''} ${dragOverIdx === idx && dragSrcIdxState !== idx ? 'tab-drag-over' : ''} ${dragSrcIdxState === idx ? 'tab-dragging' : ''}`}
+      className={`tab ${tab.id === activeTabId ? 'tab-active' : ''} ${tab.id !== activeTabId && (tab.id === panes[0] || tab.id === panes[1]) ? 'tab-in-pane' : ''} ${tab.issue ? 'tab-two-line' : ''} tab-status-${tab.agentStatus} ${dragOverIdx === idx && dragSrcIdxState !== idx ? 'tab-drag-over' : ''} ${dragSrcIdxState === idx ? 'tab-dragging' : ''}`}
       onMouseDown={(e) => handleTabMouseDown(e, idx)}
       onClick={() => onActiveTabChange(tab.id)}
       onDoubleClick={() => startEditing(tab.id, tab.issue)}
@@ -782,10 +783,10 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
                   agents.map((a) => {
                     const ab = getModelBadge(a.model)
                     // Per-agent status: done → 完了(green); started → 実行中(blue),
-                    // or 要対応(yellow) / 入力待ち(purple) when the tab itself is
-                    // attention (prompt detected) / waiting (just quiet)
-                    const st: TabAgentStatus = a.status === 'done' ? 'done' : tab.agentStatus === 'attention' || tab.agentStatus === 'waiting' ? tab.agentStatus : 'running'
-                    const stLabel = st === 'done' ? '完了' : st === 'attention' ? '要対応' : st === 'waiting' ? '入力待ち' : '実行中'
+                    // or エラー(red) / 要対応(yellow) / 入力待ち(purple) when the tab itself is
+                    // error (critical error) / attention (prompt detected) / waiting (just quiet)
+                    const st: TabAgentStatus = a.status === 'done' ? 'done' : tab.agentStatus === 'error' || tab.agentStatus === 'attention' || tab.agentStatus === 'waiting' ? tab.agentStatus : 'running'
+                    const stLabel = st === 'done' ? '完了' : st === 'error' ? 'エラー' : st === 'attention' ? '要対応' : st === 'waiting' ? '入力待ち' : '実行中'
                     return (
                       <div key={a.label} className="tab-agent-popover-item">
                         <span className="tab-model-dot" style={{ background: ab?.color ?? 'var(--text-muted)' }} />

@@ -31,14 +31,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Tab title (poll) + issue rename
   getTerminalTitle: (tabId: string) =>
-    ipcRenderer.invoke('terminal:get-title', tabId) as Promise<{ issue: string; detail: string; model: string | null; activeAgents: Array<{ label: string; model: string; status: 'started' | 'done'; doneAt?: number }>; agentStatus: 'running' | 'attention' | 'waiting' | 'done' | 'none'; promptChoices: Array<{ num: string; label: string }> }>,
+    ipcRenderer.invoke('terminal:get-title', tabId) as Promise<{ issue: string; detail: string; model: string | null; activeAgents: Array<{ label: string; model: string; status: 'started' | 'done'; doneAt?: number }>; agentStatus: 'error' | 'running' | 'attention' | 'waiting' | 'done' | 'none'; promptChoices: Array<{ num: string; label: string }> }>,
   setTerminalIssue: (tabId: string, issue: string) =>
     ipcRenderer.invoke('terminal:set-issue', tabId, issue),
 
   // Tab info (for sidebar)
   listTerminalInfo: () =>
     ipcRenderer.invoke('terminal:list-info') as Promise<
-      Array<{ id: string; cwd: string; proc: string; issue: string; latestInput: string; claudeSessionId: string | null; lastOutput: string; active: boolean; model: string | null; activeAgents: Array<{ label: string; model: string; status: 'started' | 'done'; doneAt?: number }>; agentStatus: 'running' | 'attention' | 'waiting' | 'done' | 'none'; promptChoices: Array<{ num: string; label: string }> }>
+      Array<{ id: string; cwd: string; proc: string; issue: string; latestInput: string; claudeSessionId: string | null; lastOutput: string; active: boolean; model: string | null; activeAgents: Array<{ label: string; model: string; status: 'started' | 'done'; doneAt?: number }>; agentStatus: 'error' | 'running' | 'attention' | 'waiting' | 'done' | 'none'; promptChoices: Array<{ num: string; label: string }> }>
     >,
 
   // Close confirmation + restore history
