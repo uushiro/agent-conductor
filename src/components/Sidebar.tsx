@@ -7,7 +7,7 @@ import type { TabInfo } from '../global'
 interface Props {
   onTabSelect: (tabId: string) => void
   activeTabId: string
-  onResumeSession: (sessionId: string, agent: 'claude' | 'codex', cwd?: string) => void
+  onResumeSession: (sessionId: string, agent: 'claude' | 'codex', cwd?: string, title?: string) => void
   fileTreeVisible: boolean
   onToggleFileTree: () => void
   width: number

@@ -45,6 +45,8 @@ const tabInfo = new Map<string, {
   hadGemini: boolean; geminiSessionFile: string | null; hadCodex: boolean; codexSessionId: string | null; resuming: boolean
   model: string | null
   activeAgents: ActiveAgent[]
+  // Manual rename waiting for the CLI watcher to discover a new session ID.
+  pendingSessionTitle: string | null
   // Timestamp of the last quick-answer chip send ('terminal:send-choice').
   // Used to suppress stale prompt chips until new PTY output arrives.
   lastChoiceSentAt?: number
@@ -672,9 +674,13 @@ interface SavedSession {
   activeIndex: number
 }
 
+type ResumableAgent = 'claude' | 'codex'
+type SessionTitleOverrides = Record<string, string>
+
 const IS_DEV = process.env.NODE_ENV === 'development' || !!process.env.VITE_DEV_SERVER_URL
 const SESSION_FILE = path.join(app.getPath('userData'), IS_DEV ? 'session-dev.json' : 'session.json')
 const SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json')
+const SESSION_TITLE_OVERRIDES_FILE = path.join(app.getPath('userData'), 'session-title-overrides.json')
 
 // Get recent Claude session IDs for a cwd, sorted by most recent first
 function getRecentClaudeSessions(cwd: string): string[] {
@@ -819,7 +825,17 @@ function startSessionWatch(tabId: string, cwd: string) {
       if (newFiles.length > 0) {
         const sessionId = newFiles[0].file.replace('.jsonl', '')
         const info = tabInfo.get(tabId)
-        if (info) { info.claudeSessionId = sessionId; tabInfo.set(tabId, info) }
+        if (info) {
+          if (info.pendingSessionTitle) {
+            info.claudeSessionId = sessionId
+            persistTabSessionTitle(info, info.pendingSessionTitle)
+            info.pendingSessionTitle = null
+          } else {
+            copySessionTitleOverride('claude', info.claudeResumeParentId || info.claudeSessionId, sessionId)
+            info.claudeSessionId = sessionId
+          }
+          tabInfo.set(tabId, info)
+        }
         clearInterval(watcher)
         tabSessionWatchers.delete(tabId)
       }
@@ -919,10 +935,81 @@ function startGeminiSessionWatch(tabId: string, cwd: string) {
 const CODEX_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const CODEX_ROLLOUT_RE = /^rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i
 
+interface CodexRolloutInfo {
+  cwd: string | null
+  preview: string | null
+  source: unknown
+  originator: string | null
+}
+
+const codexRolloutInfoCache = new Map<string, { mtime: number; size: number; info: CodexRolloutInfo }>()
+let codexHistoryTitlesCache: { mtime: number; size: number; titles: Map<string, string> } | null = null
+
 // Security guard: only UUID-shaped strings may ever be interpolated into a
 // PTY command ("codex resume <id>"). Anything else is rejected.
 function isCodexUuid(id: string | null | undefined): id is string {
   return !!id && CODEX_UUID_RE.test(id)
+}
+
+function sessionTitleOverrideKey(agent: ResumableAgent, sessionId: string): string {
+  return `${agent}:${sessionId.toLowerCase()}`
+}
+
+function readSessionTitleOverrides(): SessionTitleOverrides {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(SESSION_TITLE_OVERRIDES_FILE, 'utf-8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    const out: SessionTitleOverrides = {}
+    for (const [key, value] of Object.entries(parsed)) {
+      const match = key.match(/^(claude|codex):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i)
+      if (match && typeof value === 'string' && value.trim()) {
+        out[sessionTitleOverrideKey(match[1].toLowerCase() as ResumableAgent, match[2])] = value.trim().slice(0, 120)
+      }
+    }
+    return out
+  } catch { return {} }
+}
+
+function setSessionTitleOverride(agent: ResumableAgent, sessionId: string, title: string | null): boolean {
+  // Both Claude and Codex currently use UUID session IDs. Keep the same strict
+  // shape guard used before interpolating Codex IDs into PTY commands.
+  if (!isCodexUuid(sessionId)) return false
+  const overrides = readSessionTitleOverrides()
+  const key = sessionTitleOverrideKey(agent, sessionId)
+  const trimmed = typeof title === 'string' ? title.trim().slice(0, 120) : ''
+  if (trimmed) overrides[key] = trimmed
+  else delete overrides[key]
+  try {
+    fs.mkdirSync(path.dirname(SESSION_TITLE_OVERRIDES_FILE), { recursive: true })
+    const tmp = `${SESSION_TITLE_OVERRIDES_FILE}.tmp`
+    fs.writeFileSync(tmp, JSON.stringify(overrides, null, 2), 'utf-8')
+    fs.renameSync(tmp, SESSION_TITLE_OVERRIDES_FILE)
+    return true
+  } catch { return false }
+}
+
+function copySessionTitleOverride(agent: ResumableAgent, fromSessionId: string | null, toSessionId: string): void {
+  if (!isCodexUuid(fromSessionId) || !isCodexUuid(toSessionId) || fromSessionId === toSessionId) return
+  const overrides = readSessionTitleOverrides()
+  const sourceTitle = overrides[sessionTitleOverrideKey(agent, fromSessionId)]
+  const targetKey = sessionTitleOverrideKey(agent, toSessionId)
+  if (sourceTitle && !overrides[targetKey]) setSessionTitleOverride(agent, toSessionId, sourceTitle)
+}
+
+function persistTabSessionTitle(info: NonNullable<ReturnType<typeof tabInfo.get>>, title: string): boolean {
+  let persisted = false
+  if (info.hadClaude) {
+    // Keep parent and continuation aligned. The parent is the canonical resume
+    // checkpoint, while the continuation can still appear in the Resume list.
+    const ids = new Set([info.claudeResumeParentId, info.claudeSessionId])
+    for (const sessionId of ids) {
+      if (isCodexUuid(sessionId)) persisted = setSessionTitleOverride('claude', sessionId, title) || persisted
+    }
+  }
+  if (info.hadCodex && isCodexUuid(info.codexSessionId)) {
+    persisted = setSessionTitleOverride('codex', info.codexSessionId, title) || persisted
+  }
+  return persisted
 }
 
 function codexDayDir(d: Date): string {
@@ -958,32 +1045,49 @@ function readCodexRolloutCwd(filePath: string): string | null {
 }
 
 // List rollout files in a date dir as { file, dir, uuid, mtime } entries
-function listCodexRollouts(dir: string): Array<{ path: string; uuid: string; mtime: number }> {
-  const out: Array<{ path: string; uuid: string; mtime: number }> = []
+function listCodexRollouts(dir: string): Array<{ path: string; uuid: string; mtime: number; size: number }> {
+  const out: Array<{ path: string; uuid: string; mtime: number; size: number }> = []
   try {
     for (const f of fs.readdirSync(dir)) {
       const m = f.match(CODEX_ROLLOUT_RE)
       if (!m) continue
       const full = path.join(dir, f)
-      try { out.push({ path: full, uuid: m[1], mtime: fs.statSync(full).mtimeMs }) }
+      try {
+        const stat = fs.statSync(full)
+        out.push({ path: full, uuid: m[1], mtime: stat.mtimeMs, size: stat.size })
+      }
       catch { /* ignore */ }
     }
   } catch { /* ignore */ }
   return out
 }
 
-// Read cwd + a preview (first real user message) from a rollout file head.
-// Bounded read (64KB): the first line holds session_meta.payload.cwd; later
+// Read cwd + a preview (first real user message) and source from a rollout file head.
+// Bounded read (512KB): the first line holds session_meta.payload.cwd; later
 // response_item lines with payload.role === 'user' hold user messages, but the
 // first few are injected context (<environment_context>, <user_instructions>,
 // AGENTS.md instructions) and must be skipped.
-function readCodexRolloutInfo(filePath: string): { cwd: string | null; preview: string | null } {
+function readCodexRolloutInfo(filePath: string, knownMtime?: number, knownSize?: number): CodexRolloutInfo {
+  let mtime = knownMtime
+  let size = knownSize
+  if (mtime === undefined || size === undefined) {
+    try {
+      const stat = fs.statSync(filePath)
+      mtime = stat.mtimeMs
+      size = stat.size
+    } catch { /* read below returns empty info */ }
+  }
+  const cached = codexRolloutInfoCache.get(filePath)
+  if (cached && cached.mtime === mtime && cached.size === size) return cached.info
+
   let fd: number | null = null
   let cwd: string | null = null
   let preview: string | null = null
+  let source: unknown = null
+  let originator: string | null = null
   try {
     fd = fs.openSync(filePath, 'r')
-    const buf = Buffer.alloc(65536)
+    const buf = Buffer.alloc(512 * 1024)
     const bytes = fs.readSync(fd, buf, 0, buf.length, 0)
     const chunk = buf.toString('utf-8', 0, bytes)
     const lines = chunk.split('\n')
@@ -992,6 +1096,9 @@ function readCodexRolloutInfo(filePath: string): { cwd: string | null; preview: 
       const meta = JSON.parse(lines[0])
       const c = meta?.payload?.cwd ?? meta?.session_meta?.payload?.cwd
       if (typeof c === 'string') cwd = c
+      source = meta?.payload?.source ?? meta?.session_meta?.payload?.source ?? null
+      const o = meta?.payload?.originator ?? meta?.session_meta?.payload?.originator
+      if (typeof o === 'string') originator = o
     } catch { /* ignore */ }
     if (cwd === null) {
       const m = (lines[0] ?? '').match(/"cwd"\s*:\s*("(?:[^"\\]|\\.)*")/)
@@ -1020,7 +1127,47 @@ function readCodexRolloutInfo(filePath: string): { cwd: string | null; preview: 
   } catch { /* ignore */ } finally {
     if (fd !== null) { try { fs.closeSync(fd) } catch { /* ignore */ } }
   }
-  return { cwd, preview }
+  const info = { cwd, preview, source, originator }
+  if (mtime !== undefined && size !== undefined) codexRolloutInfoCache.set(filePath, { mtime, size, info })
+  return info
+}
+
+// history.jsonl contains only user-visible Codex threads and records the actual
+// submitted prompts without the large injected context found in rollout files.
+// Returning null (rather than an empty map) distinguishes a read failure from a
+// valid empty history so callers can use the rollout fallback deliberately.
+function readCodexHistoryTitles(): Map<string, string> | null {
+  try {
+    const historyPath = path.join(HOME, '.codex', 'history.jsonl')
+    const stat = fs.statSync(historyPath)
+    if (codexHistoryTitlesCache?.mtime === stat.mtimeMs && codexHistoryTitlesCache.size === stat.size) {
+      return codexHistoryTitlesCache.titles
+    }
+    const titles = new Map<string, string>()
+    const history = fs.readFileSync(historyPath, 'utf-8')
+    for (const line of history.split('\n')) {
+      if (!line.trim()) continue
+      try {
+        const entry = JSON.parse(line)
+        const sessionId = entry?.session_id
+        const text = entry?.text
+        if (!isCodexUuid(sessionId) || titles.has(sessionId.toLowerCase()) || typeof text !== 'string') continue
+        const title = text.trim().split('\n')[0].trim().slice(0, 120)
+        if (title) titles.set(sessionId.toLowerCase(), title)
+      } catch { /* skip malformed history lines */ }
+    }
+    codexHistoryTitlesCache = { mtime: stat.mtimeMs, size: stat.size, titles }
+    return titles
+  } catch { return null }
+}
+
+function isInteractiveCodexRollout(source: unknown, originator: string | null): boolean {
+  if (typeof source === 'string') return source === 'cli' || source === 'vscode'
+  // Object-valued sources identify subagents/background helpers in current
+  // Codex rollouts. For older files with no source, accept known interactive
+  // originators as a best-effort fallback.
+  if (source && typeof source === 'object') return false
+  return !!originator && /^(codex-tui|codex_cli_rs|codex_chatgpt.*remote)$/i.test(originator)
 }
 
 // List ALL codex sessions across every date dir under ~/.codex/sessions
@@ -1031,6 +1178,7 @@ function listCodexSessions(cwdFilter?: string | null): Array<{
   id: string; title: string; cwd: string; updatedAt: number; sizeBytes: number
 }> {
   const root = path.join(HOME, '.codex', 'sessions')
+  const historyTitles = readCodexHistoryTitles()
   const numericDirs = (dir: string): string[] => {
     try {
       return fs.readdirSync(dir).filter((d) => /^\d+$/.test(d)).map((d) => path.join(dir, d))
@@ -1042,17 +1190,24 @@ function listCodexSessions(cwdFilter?: string | null): Array<{
       for (const dayDir of numericDirs(monthDir)) {
         for (const entry of listCodexRollouts(dayDir)) {
           if (!isCodexUuid(entry.uuid)) continue
-          const { cwd, preview } = readCodexRolloutInfo(entry.path)
+          const { cwd, preview, source, originator } = readCodexRolloutInfo(entry.path, entry.mtime, entry.size)
           if (cwd === null) continue
           if (cwdFilter && cwd !== cwdFilter) continue
-          let size = 0
-          try { size = fs.statSync(entry.path).size } catch { /* ignore */ }
+          const historyTitle = historyTitles?.get(entry.uuid.toLowerCase())
+          // Current Codex marks subagents and guardians with an object-valued
+          // source. Reject them even if a future history format references one.
+          if (source && typeof source === 'object') continue
+          // A history match is the strongest signal for a visible thread. A
+          // freshly-created interactive session may not be flushed there yet,
+          // so session_meta is the fallback. Object-valued subagent/guardian
+          // sources fail that fallback and stay out of Resume.
+          if (!historyTitle && !isInteractiveCodexRollout(source, originator)) continue
           out.push({
             id: entry.uuid,
-            title: preview || entry.uuid,
+            title: historyTitle || preview || entry.uuid,
             cwd,
             updatedAt: entry.mtime,
-            sizeBytes: size,
+            sizeBytes: entry.size,
           })
         }
       }
@@ -1111,7 +1266,17 @@ function startCodexSessionWatch(tabId: string, cwd: string) {
         if (fileCwd === null) continue // first line may not be flushed yet — retry next tick
         if (fileCwd !== cwd) { knownFiles.add(e.path); continue } // another project's session
         const info = tabInfo.get(tabId)
-        if (info) { info.codexSessionId = e.uuid; tabInfo.set(tabId, info) }
+        if (info) {
+          const previousSessionId = info.codexSessionId
+          info.codexSessionId = e.uuid
+          if (info.pendingSessionTitle) {
+            persistTabSessionTitle(info, info.pendingSessionTitle)
+            info.pendingSessionTitle = null
+          } else {
+            copySessionTitleOverride('codex', previousSessionId, e.uuid)
+          }
+          tabInfo.set(tabId, info)
+        }
         console.log(`[codex-session] captured ${e.uuid} for ${tabId} (${cwd})`)
         clearInterval(watcher)
         tabCodexSessionWatchers.delete(tabId)
@@ -1255,7 +1420,7 @@ function autoTitle(input: string): string {
 }
 
 function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
-  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGemini: false, geminiSessionFile: null as string | null, hadCodex: false, codexSessionId: null as string | null, resuming: false, model: null as string | null, activeAgents: [] as ActiveAgent[] }
+  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGemini: false, geminiSessionFile: null as string | null, hadCodex: false, codexSessionId: null as string | null, resuming: false, model: null as string | null, activeAgents: [] as ActiveAgent[], pendingSessionTitle: null as string | null }
   const prevProc = info.proc
 
   try {
@@ -1279,6 +1444,7 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
         info.claudeSessionId = null
         info.claudeResumeParentId = null
         info.model = null
+        info.pendingSessionTitle = null
       }
       if (prevProc === 'gemini') {
         info.hadGemini = false
@@ -1287,6 +1453,7 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
       if (prevProc === 'codex') {
         info.hadCodex = false
         info.codexSessionId = null
+        info.pendingSessionTitle = null
       }
       info.latestInput = ''
       tabInputBuf.delete(id)
@@ -1318,7 +1485,7 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
   })
 
   ptyProcesses.set(id, ptyProcess)
-  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null, hadCodex: false, codexSessionId: null, resuming: false, model: null, activeAgents: [] })
+  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null, hadCodex: false, codexSessionId: null, resuming: false, model: null, activeAgents: [], pendingSessionTitle: null })
   tabOrder.push(id)
 
   // Inject shell hook to emit OSC 7 on every prompt (cwd tracking without lsof).
@@ -1518,14 +1685,19 @@ function createWindow() {
     ipcHandlersRegistered = true
 
   // Create a new terminal tab (optional cwd)
-  // pendingSessionId: if provided, pre-marks this tab as hadClaude=true with a resume fallback.
-  // This ensures saveSession() can recover the session ID even if the app exits before Claude starts.
-  ipcMain.handle('terminal:create', (_event, cwd?: string, pendingSessionId?: string) => {
+  // pendingSessionId pre-marks a Resume-created tab with its agent/session so
+  // title sync and saveSession() work even before the CLI process starts.
+  ipcMain.handle('terminal:create', (_event, cwd?: string, pendingSessionId?: string, pendingAgent: ResumableAgent = 'claude') => {
     const { id } = spawnPty(cwd)
     if (pendingSessionId) {
       const info = tabInfo.get(id)!
-      info.hadClaude = true
-      info.claudeResumeParentId = pendingSessionId
+      if (pendingAgent === 'codex' && isCodexUuid(pendingSessionId)) {
+        info.hadCodex = true
+        info.codexSessionId = pendingSessionId
+      } else {
+        info.hadClaude = true
+        info.claudeResumeParentId = pendingSessionId
+      }
       info.resuming = true
       tabInfo.set(id, info)
     }
@@ -1564,10 +1736,19 @@ function createWindow() {
   })
 
   // Set issue from renderer (manual rename)
-  ipcMain.handle('terminal:set-issue', (_event, tabId: string, issue: string) => {
+  ipcMain.handle('terminal:set-issue', (_event, tabId: string, issue: string, persistSessionTitle = false) => {
     const info = tabInfo.get(tabId)
     if (info) {
       info.issue = issue
+      if (persistSessionTitle) {
+        // Persist any IDs already known immediately. Keep the rename pending
+        // when no ID exists yet (including a tab renamed before the agent is
+        // launched), or while a watcher is waiting for a continuation/fork.
+        const persisted = persistTabSessionTitle(info, issue)
+        info.pendingSessionTitle = !persisted || tabSessionWatchers.has(tabId) || tabCodexSessionWatchers.has(tabId)
+          ? issue.trim().slice(0, 120)
+          : null
+      }
       tabInfo.set(tabId, info)
     }
   })
@@ -2105,12 +2286,15 @@ function createWindow() {
     const sessions: Array<{
       id: string
       title: string
+      automaticTitle: string
+      hasCustomTitle: boolean
       projectDir: string
       updatedAt: number
       sizeBytes: number
       agent: 'claude' | 'codex'
       cwd?: string
     }> = []
+    const titleOverrides = readSessionTitleOverrides()
 
     for (const dir of dirs) {
       let files: string[]
@@ -2150,9 +2334,13 @@ function createWindow() {
           }
         } catch { /* skip on read error */ }
 
+        const automaticTitle = title
+        const customTitle = titleOverrides[sessionTitleOverrideKey('claude', id)]
         sessions.push({
           id,
-          title,
+          title: customTitle || automaticTitle,
+          automaticTitle,
+          hasCustomTitle: !!customTitle,
           projectDir: dir,
           updatedAt: stat.mtimeMs,
           sizeBytes: stat.size,
@@ -2172,9 +2360,12 @@ function createWindow() {
         : null
       for (const s of listCodexSessions()) {
         if (wantedEncoded && !wantedEncoded.has(encodeCwd(s.cwd))) continue
+        const customTitle = titleOverrides[sessionTitleOverrideKey('codex', s.id)]
         sessions.push({
           id: s.id,
-          title: s.title,
+          title: customTitle || s.title,
+          automaticTitle: s.title,
+          hasCustomTitle: !!customTitle,
           projectDir: s.cwd,
           updatedAt: s.updatedAt,
           sizeBytes: s.sizeBytes,
@@ -2186,6 +2377,12 @@ function createWindow() {
 
     sessions.sort((a, b) => b.updatedAt - a.updatedAt)
     return sessions
+  })
+
+  ipcMain.handle('resume:set-title-override', (_event, agent: ResumableAgent, sessionId: string, title: string | null) => {
+    if (agent !== 'claude' && agent !== 'codex') return false
+    if (title !== null && typeof title !== 'string') return false
+    return setSessionTitleOverride(agent, sessionId, title)
   })
 
   } // end ipcHandlersRegistered guard

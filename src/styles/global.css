@@ -2118,6 +2118,62 @@ html, body, #root {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.resume-title-custom {
+  font-weight: 600;
+}
+.resume-title-input {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  box-sizing: border-box;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg-tertiary, #1c2128);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+  padding: 1px 5px;
+}
+.resume-title-reset {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 20px;
+}
+.resume-title-edit {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 20px;
+  opacity: 0.55;
+}
+.resume-item:hover .resume-title-edit,
+.resume-title-edit:focus-visible {
+  opacity: 1;
+}
+.resume-title-edit:hover {
+  background: var(--bg-tertiary, #1c2128);
+  color: var(--text-primary);
+}
+.resume-title-reset:hover {
+  background: var(--bg-tertiary, #1c2128);
+  color: var(--text-primary);
+}
 .resume-meta {
   font-size: 10px;
   color: var(--text-muted);

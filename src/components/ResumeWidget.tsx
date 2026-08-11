@@ -5,6 +5,8 @@ const POLL_INTERVAL_MS = 10000
 interface ResumeSession {
   id: string
   title: string
+  automaticTitle: string
+  hasCustomTitle: boolean
   projectDir: string
   updatedAt: number
   sizeBytes: number
@@ -20,7 +22,11 @@ const AGENT_ICONS: Record<ResumeSession['agent'], string> = {
 
 interface Props {
   projectDirs: string[]
-  onResumeSession: (sessionId: string, agent: 'claude' | 'codex', cwd?: string) => void
+  onResumeSession: (sessionId: string, agent: 'claude' | 'codex', cwd?: string, title?: string) => void
+}
+
+function sessionKey(session: Pick<ResumeSession, 'agent' | 'id'>): string {
+  return `${session.agent}:${session.id}`
 }
 
 function timeAgo(ms: number): string {
@@ -43,22 +49,33 @@ export function ResumeWidget({ projectDirs, onResumeSession }: Props) {
   const [sessions, setSessions] = useState<ResumeSession[]>([])
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
+  const [editingKey, setEditingKey] = useState<string | null>(null)
+  const [editValue, setEditValue] = useState('')
   const loadedOnceRef = useRef(false)
-  const inFlightRef = useRef(false)
+  const cancelEditRef = useRef(false)
+  const mutationGenerationRef = useRef(0)
+  const loadGenerationRef = useRef(0)
 
   const load = useCallback(async (force = false) => {
-    if (inFlightRef.current) return
-    inFlightRef.current = true
+    const loadGeneration = ++loadGenerationRef.current
     if (!loadedOnceRef.current || force) setLoading(true)
+    const mutationGeneration = mutationGenerationRef.current
     try {
       const result = await window.electronAPI.listResumeSessions(projectDirs.length > 0 ? projectDirs : null)
-      setSessions(result)
+      // A rename/reset may finish while this disk scan is in flight. Never let
+      // that older result overwrite the optimistic local mutation.
+      if (loadGeneration === loadGenerationRef.current && mutationGeneration === mutationGenerationRef.current) {
+        setSessions(result)
+      }
     } catch {
-      setSessions([])
+      if (loadGeneration === loadGenerationRef.current && mutationGeneration === mutationGenerationRef.current) {
+        setSessions([])
+      }
     } finally {
-      setLoading(false)
-      loadedOnceRef.current = true
-      inFlightRef.current = false
+      if (loadGeneration === loadGenerationRef.current) {
+        setLoading(false)
+        loadedOnceRef.current = true
+      }
     }
   }, [projectDirs])
 
@@ -80,8 +97,54 @@ export function ResumeWidget({ projectDirs, onResumeSession }: Props) {
   }, [load])
 
   const filtered = query.trim()
-    ? sessions.filter((s) => s.title.toLowerCase().includes(query.toLowerCase()))
+    ? sessions.filter((s) => {
+        const q = query.toLowerCase()
+        return s.title.toLowerCase().includes(q) || s.automaticTitle.toLowerCase().includes(q)
+      })
     : sessions
+
+  const beginRename = (event: React.MouseEvent, session: ResumeSession) => {
+    event.stopPropagation()
+    cancelEditRef.current = false
+    setEditingKey(sessionKey(session))
+    setEditValue(session.title)
+  }
+
+  const commitRename = async (session: ResumeSession) => {
+    if (cancelEditRef.current) {
+      cancelEditRef.current = false
+      return
+    }
+    const title = editValue.trim().slice(0, 120)
+    setEditingKey(null)
+    const mutationGeneration = ++mutationGenerationRef.current
+    const saved = await window.electronAPI.setResumeSessionTitle(session.agent, session.id, title || null)
+    if (!saved || mutationGeneration !== mutationGenerationRef.current) return
+    mutationGenerationRef.current += 1
+    setSessions((current) => current.map((item) =>
+      sessionKey(item) === sessionKey(session)
+        ? { ...item, title: title || item.automaticTitle, hasCustomTitle: !!title }
+        : item
+    ))
+  }
+
+  const resetTitle = async (event: React.MouseEvent, session: ResumeSession) => {
+    event.stopPropagation()
+    const mutationGeneration = ++mutationGenerationRef.current
+    const saved = await window.electronAPI.setResumeSessionTitle(session.agent, session.id, null)
+    if (!saved || mutationGeneration !== mutationGenerationRef.current) return
+    mutationGenerationRef.current += 1
+    setSessions((current) => current.map((item) =>
+      sessionKey(item) === sessionKey(session)
+        ? { ...item, title: item.automaticTitle, hasCustomTitle: false }
+        : item
+    ))
+  }
+
+  const handleSessionClick = (session: ResumeSession) => {
+    if (editingKey) return
+    onResumeSession(session.id, session.agent, session.cwd, session.hasCustomTitle ? session.title : undefined)
+  }
 
   return (
     <div className="resume-widget">
@@ -109,12 +172,59 @@ export function ResumeWidget({ projectDirs, onResumeSession }: Props) {
           <div
             key={`${s.agent}:${s.id}`}
             className="resume-item"
-            onClick={() => onResumeSession(s.id, s.agent, s.cwd)}
+            onClick={() => handleSessionClick(s)}
             title={s.title}
           >
             <span className="resume-item-head">
               <span className="agent-icon">{AGENT_ICONS[s.agent]}</span>
-              <span className="resume-title">{s.title}</span>
+              {editingKey === sessionKey(s) ? (
+                <input
+                  className="resume-title-input"
+                  value={editValue}
+                  maxLength={120}
+                  autoFocus
+                  onChange={(event) => setEditValue(event.target.value)}
+                  onClick={(event) => event.stopPropagation()}
+                  onDoubleClick={(event) => event.stopPropagation()}
+                  onBlur={() => commitRename(s)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') event.currentTarget.blur()
+                    if (event.key === 'Escape') {
+                      cancelEditRef.current = true
+                      setEditingKey(null)
+                    }
+                  }}
+                />
+              ) : (
+                <span
+                  className={`resume-title${s.hasCustomTitle ? ' resume-title-custom' : ''}`}
+                  title={`${s.title}\nClick to resume`}
+                >
+                  {s.title}
+                </span>
+              )}
+              {editingKey !== sessionKey(s) && (
+                <button
+                  className="resume-title-edit"
+                  title="Rename session"
+                  aria-label="Rename session"
+                  onClick={(event) => beginRename(event, s)}
+                  onDoubleClick={(event) => event.stopPropagation()}
+                >
+                  ✎
+                </button>
+              )}
+              {s.hasCustomTitle && editingKey !== sessionKey(s) && (
+                <button
+                  className="resume-title-reset"
+                  title={`Reset to automatic title: ${s.automaticTitle}`}
+                  aria-label="Reset to automatic title"
+                  onClick={(event) => resetTitle(event, s)}
+                  onDoubleClick={(event) => event.stopPropagation()}
+                >
+                  ↶
+                </button>
+              )}
             </span>
             <span className="resume-meta">{timeAgo(s.updatedAt)} · {formatSize(s.sizeBytes)}</span>
           </div>

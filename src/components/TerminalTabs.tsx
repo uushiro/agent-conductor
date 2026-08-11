@@ -5,7 +5,7 @@ import { useLang, strings } from '../contexts/LangContext'
 
 export interface TerminalTabsHandle {
   sendToNewTab: (prompt: string, agent: 'claude' | 'gemini' | 'codex') => void
-  resumeSession: (sessionId: string, agent: 'claude' | 'codex', cwd?: string) => void
+  resumeSession: (sessionId: string, agent: 'claude' | 'codex', cwd?: string, title?: string) => void
 }
 
 // In-tab worker agent reported via [[AGENT: label :: model :: started|done]] markers.
@@ -157,9 +157,15 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       const geminiResumes: Array<{ tabId: string }> = []
       const codexResumes: Array<{ tabId: string; sessionId: string | null }> = []
       for (const saved of session.tabs) {
+        const pendingSessionId = saved.hadClaude
+          ? saved.claudeSessionId ?? undefined
+          : saved.hadCodex
+          ? saved.codexSessionId ?? undefined
+          : undefined
         const tabId = await window.electronAPI.createTerminal(
           saved.cwd,
-          saved.hadClaude ? saved.claudeSessionId ?? undefined : undefined
+          pendingSessionId,
+          saved.hadCodex ? 'codex' : 'claude'
         )
         if (saved.issue) {
           await window.electronAPI.setTerminalIssue(tabId, saved.issue)
@@ -458,16 +464,17 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     sendToNewTab: (prompt: string, agent: 'claude' | 'gemini' | 'codex') => {
       createTab(agent, prompt)
     },
-    resumeSession: async (sessionId: string, agent: 'claude' | 'codex', cwd?: string) => {
+    resumeSession: async (sessionId: string, agent: 'claude' | 'codex', cwd?: string, title?: string) => {
       // claude: pendingSessionId drives main-side cwd resolution from the
       // session file. codex has no such mapping — open the terminal directly
       // in the rollout's cwd (from the resume list) and resume by UUID.
       const tabId = agent === 'codex'
-        ? await window.electronAPI.createTerminal(cwd)
-        : await window.electronAPI.createTerminal(undefined, sessionId)
+        ? await window.electronAPI.createTerminal(cwd, sessionId, 'codex')
+        : await window.electronAPI.createTerminal(undefined, sessionId, 'claude')
+      if (title) await window.electronAPI.setTerminalIssue(tabId, title)
       setTabs((prev) => [
         ...prev,
-        { id: tabId, issue: '', detail: 'Terminal', customIssue: false, resuming: true, model: null, activeAgents: [], agentStatus: 'none', promptChoices: [] },
+        { id: tabId, issue: title || '', detail: 'Terminal', customIssue: !!title, resuming: true, model: null, activeAgents: [], agentStatus: 'none', promptChoices: [] },
       ])
       onActiveTabChange(tabId)
       setTimeout(() => {
@@ -602,7 +609,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     if (!editingTabId) return
     const trimmed = editValue.trim()
     if (trimmed) {
-      window.electronAPI.setTerminalIssue(editingTabId, trimmed)
+      window.electronAPI.setTerminalIssue(editingTabId, trimmed, true)
       setTabs((prev) =>
         prev.map((t) =>
           t.id === editingTabId ? { ...t, issue: trimmed, customIssue: true } : t

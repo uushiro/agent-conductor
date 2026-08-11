@@ -2,7 +2,8 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // Terminal lifecycle
-  createTerminal: (cwd?: string, pendingSessionId?: string) => ipcRenderer.invoke('terminal:create', cwd, pendingSessionId) as Promise<string>,
+  createTerminal: (cwd?: string, pendingSessionId?: string, pendingAgent?: 'claude' | 'codex') =>
+    ipcRenderer.invoke('terminal:create', cwd, pendingSessionId, pendingAgent) as Promise<string>,
   createWorktreeTerminal: (tabId: string, branchName?: string) =>
     ipcRenderer.invoke('terminal:create-worktree', tabId, branchName) as Promise<
       { ok: true; tabId: string; worktreePath: string; branch: string } | { ok: false; error: string }
@@ -32,8 +33,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Tab title (poll) + issue rename
   getTerminalTitle: (tabId: string) =>
     ipcRenderer.invoke('terminal:get-title', tabId) as Promise<{ issue: string; detail: string; model: string | null; activeAgents: Array<{ label: string; model: string; status: 'started' | 'done'; doneAt?: number }>; agentStatus: 'error' | 'running' | 'attention' | 'waiting' | 'done' | 'none'; promptChoices: Array<{ num: string; label: string }> }>,
-  setTerminalIssue: (tabId: string, issue: string) =>
-    ipcRenderer.invoke('terminal:set-issue', tabId, issue),
+  setTerminalIssue: (tabId: string, issue: string, persistSessionTitle?: boolean) =>
+    ipcRenderer.invoke('terminal:set-issue', tabId, issue, persistSessionTitle),
 
   // Tab info (for sidebar)
   listTerminalInfo: () =>
@@ -113,7 +114,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   pasteToWindow: () => ipcRenderer.invoke('window:paste'),
   listResumeSessions: (projectDirs: string[] | null) =>
     ipcRenderer.invoke('resume:list-sessions', projectDirs) as Promise<Array<{
-      id: string; title: string; projectDir: string; updatedAt: number; sizeBytes: number
+      id: string; title: string; automaticTitle: string; hasCustomTitle: boolean; projectDir: string; updatedAt: number; sizeBytes: number
       agent: 'claude' | 'codex'; cwd?: string
     }>>,
+  setResumeSessionTitle: (agent: 'claude' | 'codex', sessionId: string, title: string | null) =>
+    ipcRenderer.invoke('resume:set-title-override', agent, sessionId, title) as Promise<boolean>,
 })

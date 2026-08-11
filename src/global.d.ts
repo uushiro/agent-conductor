@@ -60,7 +60,7 @@ export interface SavedSession {
 }
 
 export interface ElectronAPI {
-  createTerminal: (cwd?: string, pendingSessionId?: string) => Promise<string>
+  createTerminal: (cwd?: string, pendingSessionId?: string, pendingAgent?: 'claude' | 'codex') => Promise<string>
   createWorktreeTerminal: (tabId: string, branchName?: string) => Promise<
     { ok: true; tabId: string; worktreePath: string; branch: string } | { ok: false; error: string }
   >
@@ -70,7 +70,7 @@ export interface ElectronAPI {
   sendChoice: (tabId: string, num: string) => Promise<void>
   resizeTerminal: (tabId: string, cols: number, rows: number) => void
   getTerminalTitle: (tabId: string) => Promise<{ issue: string; detail: string; model: string | null; activeAgents: ActiveAgent[]; agentStatus: TabAgentStatus; promptChoices: PromptChoice[] }>
-  setTerminalIssue: (tabId: string, issue: string) => Promise<void>
+  setTerminalIssue: (tabId: string, issue: string, persistSessionTitle?: boolean) => Promise<void>
   listTerminalInfo: () => Promise<TabInfo[]>
   getTabHasClaude: (tabId: string) => Promise<boolean>
   reorderTerminals: (tabIds: string[]) => void
@@ -96,9 +96,10 @@ export interface ElectronAPI {
   getPathForFile: (file: File) => string
   pasteToWindow: () => Promise<void>
   listResumeSessions: (projectDirs: string[] | null) => Promise<Array<{
-    id: string; title: string; projectDir: string; updatedAt: number; sizeBytes: number
+    id: string; title: string; automaticTitle: string; hasCustomTitle: boolean; projectDir: string; updatedAt: number; sizeBytes: number
     agent: 'claude' | 'codex'; cwd?: string
   }>>
+  setResumeSessionTitle: (agent: 'claude' | 'codex', sessionId: string, title: string | null) => Promise<boolean>
 }
 
 declare global {
