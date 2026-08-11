@@ -2101,6 +2101,16 @@ html, body, #root {
 .resume-item:hover {
   background: var(--bg-hover, #21262d);
 }
+.resume-item-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.resume-item-head .resume-title {
+  flex: 1;
+  min-width: 0;
+}
 .resume-title {
   font-size: 12px;
   color: var(--text-primary);

@@ -42,7 +42,7 @@ type TabAgentStatus = 'error' | 'running' | 'attention' | 'waiting' | 'done' | '
 const tabInfo = new Map<string, {
   cwd: string; proc: string; issue: string; latestInput: string
   claudeSessionId: string | null; claudeResumeParentId: string | null; hadClaude: boolean
-  hadGemini: boolean; geminiSessionFile: string | null; hadCodex: boolean; resuming: boolean
+  hadGemini: boolean; geminiSessionFile: string | null; hadCodex: boolean; codexSessionId: string | null; resuming: boolean
   model: string | null
   activeAgents: ActiveAgent[]
   // Timestamp of the last quick-answer chip send ('terminal:send-choice').
@@ -67,6 +67,7 @@ interface ClosedTabEntry {
   issue: string
   cwd: string
   claudeSessionId: string | null
+  codexSessionId: string | null
   agent: 'claude' | 'gemini' | 'codex'
   closedAt: number
   model: string | null
@@ -78,6 +79,7 @@ const tabLastOutputAt = new Map<string, number>()
 const tabLastInputAt = new Map<string, number>()
 const tabSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
 const tabGeminiSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
+const tabCodexSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
 // tabId → timestamp until which [[SEND:]] detection is suppressed (resume replay window)
 const tabResumeCooldown = new Map<string, number>()
 const RESUME_COOLDOWN_MS = 60000
@@ -661,6 +663,7 @@ interface SavedTab {
   claudeSessionId: string | null
   hadGemini: boolean
   hadCodex: boolean
+  codexSessionId: string | null
   model: string | null
 }
 
@@ -736,6 +739,9 @@ function saveSession() {
         claudeSessionId,
         hadGemini: info.hadGemini,
         hadCodex: info.hadCodex,
+        codexSessionId: info.hadCodex
+          ? (isCodexUuid(info.codexSessionId) ? info.codexSessionId : getLastCodexSessionId(info.cwd || HOME))
+          : null,
         model: info.model,
       })
     }
@@ -904,6 +910,223 @@ function startGeminiSessionWatch(tabId: string, cwd: string) {
   }, 60000)
 }
 
+// --- Codex session helpers ---
+
+// Codex stores rollouts in ~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl.
+// Unlike claude/gemini, the directory tree is NOT split by cwd — all projects' sessions
+// share the same date directory, so every candidate file's first-line
+// session_meta.payload.cwd must be checked against the tab's cwd before use.
+const CODEX_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const CODEX_ROLLOUT_RE = /^rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i
+
+// Security guard: only UUID-shaped strings may ever be interpolated into a
+// PTY command ("codex resume <id>"). Anything else is rejected.
+function isCodexUuid(id: string | null | undefined): id is string {
+  return !!id && CODEX_UUID_RE.test(id)
+}
+
+function codexDayDir(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return path.join(HOME, '.codex', 'sessions', String(d.getFullYear()), pad(d.getMonth() + 1), pad(d.getDate()))
+}
+
+// Read session_meta.payload.cwd from the first line of a rollout file.
+// Reads only the head of the file; falls back to a regex extract if the
+// first line is longer than the read window or JSON.parse fails.
+function readCodexRolloutCwd(filePath: string): string | null {
+  let fd: number | null = null
+  try {
+    fd = fs.openSync(filePath, 'r')
+    const buf = Buffer.alloc(65536)
+    const bytes = fs.readSync(fd, buf, 0, buf.length, 0)
+    const chunk = buf.toString('utf-8', 0, bytes)
+    const nl = chunk.indexOf('\n')
+    const firstLine = nl === -1 ? chunk : chunk.slice(0, nl)
+    try {
+      const meta = JSON.parse(firstLine)
+      const cwd = meta?.payload?.cwd ?? meta?.session_meta?.payload?.cwd
+      if (typeof cwd === 'string') return cwd
+    } catch { /* fall through to regex */ }
+    const m = firstLine.match(/"cwd"\s*:\s*("(?:[^"\\]|\\.)*")/)
+    if (m) {
+      try { return JSON.parse(m[1]) as string } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ } finally {
+    if (fd !== null) { try { fs.closeSync(fd) } catch { /* ignore */ } }
+  }
+  return null
+}
+
+// List rollout files in a date dir as { file, dir, uuid, mtime } entries
+function listCodexRollouts(dir: string): Array<{ path: string; uuid: string; mtime: number }> {
+  const out: Array<{ path: string; uuid: string; mtime: number }> = []
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      const m = f.match(CODEX_ROLLOUT_RE)
+      if (!m) continue
+      const full = path.join(dir, f)
+      try { out.push({ path: full, uuid: m[1], mtime: fs.statSync(full).mtimeMs }) }
+      catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+  return out
+}
+
+// Read cwd + a preview (first real user message) from a rollout file head.
+// Bounded read (64KB): the first line holds session_meta.payload.cwd; later
+// response_item lines with payload.role === 'user' hold user messages, but the
+// first few are injected context (<environment_context>, <user_instructions>,
+// AGENTS.md instructions) and must be skipped.
+function readCodexRolloutInfo(filePath: string): { cwd: string | null; preview: string | null } {
+  let fd: number | null = null
+  let cwd: string | null = null
+  let preview: string | null = null
+  try {
+    fd = fs.openSync(filePath, 'r')
+    const buf = Buffer.alloc(65536)
+    const bytes = fs.readSync(fd, buf, 0, buf.length, 0)
+    const chunk = buf.toString('utf-8', 0, bytes)
+    const lines = chunk.split('\n')
+    // First line: session_meta with cwd
+    try {
+      const meta = JSON.parse(lines[0])
+      const c = meta?.payload?.cwd ?? meta?.session_meta?.payload?.cwd
+      if (typeof c === 'string') cwd = c
+    } catch { /* ignore */ }
+    if (cwd === null) {
+      const m = (lines[0] ?? '').match(/"cwd"\s*:\s*("(?:[^"\\]|\\.)*")/)
+      if (m) { try { cwd = JSON.parse(m[1]) as string } catch { /* ignore */ } }
+    }
+    // Subsequent lines: first genuine user message
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i]
+      if (!line.trim()) continue
+      let obj: { type?: string; payload?: { type?: string; role?: string; content?: Array<{ type?: string; text?: string }> } }
+      try { obj = JSON.parse(line) } catch { continue }
+      if (obj?.type !== 'response_item') continue
+      const p = obj.payload
+      if (p?.type !== 'message' || p?.role !== 'user' || !Array.isArray(p.content)) continue
+      const text = p.content
+        .filter((c) => typeof c?.text === 'string')
+        .map((c) => c.text as string)
+        .join('\n')
+        .trim()
+      if (!text) continue
+      // Skip injected context blocks (env context, user instructions, AGENTS.md)
+      if (/^(<environment_context|<user_instructions|<permissions|<recommended_plugins|#\s*AGENTS\.md)/i.test(text)) continue
+      preview = text.split('\n')[0].slice(0, 120)
+      break
+    }
+  } catch { /* ignore */ } finally {
+    if (fd !== null) { try { fs.closeSync(fd) } catch { /* ignore */ } }
+  }
+  return { cwd, preview }
+}
+
+// List ALL codex sessions across every date dir under ~/.codex/sessions
+// (full recursive year/month/day walk — numeric dir names only). Total volume
+// is small (tens of files), so an unbounded walk is fine here, unlike
+// getLastCodexSessionId which stays date-limited for its hot path.
+function listCodexSessions(cwdFilter?: string | null): Array<{
+  id: string; title: string; cwd: string; updatedAt: number; sizeBytes: number
+}> {
+  const root = path.join(HOME, '.codex', 'sessions')
+  const numericDirs = (dir: string): string[] => {
+    try {
+      return fs.readdirSync(dir).filter((d) => /^\d+$/.test(d)).map((d) => path.join(dir, d))
+    } catch { return [] }
+  }
+  const out: Array<{ id: string; title: string; cwd: string; updatedAt: number; sizeBytes: number }> = []
+  for (const yearDir of numericDirs(root)) {
+    for (const monthDir of numericDirs(yearDir)) {
+      for (const dayDir of numericDirs(monthDir)) {
+        for (const entry of listCodexRollouts(dayDir)) {
+          if (!isCodexUuid(entry.uuid)) continue
+          const { cwd, preview } = readCodexRolloutInfo(entry.path)
+          if (cwd === null) continue
+          if (cwdFilter && cwd !== cwdFilter) continue
+          let size = 0
+          try { size = fs.statSync(entry.path).size } catch { /* ignore */ }
+          out.push({
+            id: entry.uuid,
+            title: preview || entry.uuid,
+            cwd,
+            updatedAt: entry.mtime,
+            sizeBytes: size,
+          })
+        }
+      }
+    }
+  }
+  return out
+}
+
+// Get the most recent codex session UUID whose rollout cwd matches the given cwd.
+// Scans the last few date dirs only (no recursive walk of ~/.codex/sessions).
+function getLastCodexSessionId(cwd: string): string | null {
+  const dirs: string[] = []
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000)
+    const dir = codexDayDir(d)
+    if (!dirs.includes(dir)) dirs.push(dir)
+  }
+  const candidates = dirs.flatMap(listCodexRollouts).sort((a, b) => b.mtime - a.mtime)
+  // Bound the number of first-line reads to keep this cheap
+  for (const c of candidates.slice(0, 50)) {
+    if (!isCodexUuid(c.uuid)) continue
+    if (readCodexRolloutCwd(c.path) === cwd) return c.uuid
+  }
+  return null
+}
+
+// Watch for a new codex rollout file created after codex starts.
+// Watches today's date dir plus the dir from watcher start time (date-rollover
+// safety, max 2 dirs). A new file only "confirms" if its first-line cwd matches
+// the tab's cwd — other tabs/projects write into the same shared date dir.
+function startCodexSessionWatch(tabId: string, cwd: string) {
+  const existing = tabCodexSessionWatchers.get(tabId)
+  if (existing) { clearInterval(existing); tabCodexSessionWatchers.delete(tabId) }
+
+  const startDir = codexDayDir(new Date())
+  const watchDirs = () => {
+    const today = codexDayDir(new Date())
+    return today === startDir ? [startDir] : [startDir, today]
+  }
+
+  const knownFiles = new Set<string>()
+  for (const dir of watchDirs()) {
+    for (const e of listCodexRollouts(dir)) knownFiles.add(e.path)
+  }
+  const startTime = Date.now()
+
+  const watcher = setInterval(() => {
+    try {
+      const newFiles = watchDirs()
+        .flatMap(listCodexRollouts)
+        .filter((e) => !knownFiles.has(e.path) && e.mtime >= startTime - 500)
+        .sort((a, b) => a.mtime - b.mtime)
+      for (const e of newFiles) {
+        if (!isCodexUuid(e.uuid)) { knownFiles.add(e.path); continue }
+        const fileCwd = readCodexRolloutCwd(e.path)
+        if (fileCwd === null) continue // first line may not be flushed yet — retry next tick
+        if (fileCwd !== cwd) { knownFiles.add(e.path); continue } // another project's session
+        const info = tabInfo.get(tabId)
+        if (info) { info.codexSessionId = e.uuid; tabInfo.set(tabId, info) }
+        console.log(`[codex-session] captured ${e.uuid} for ${tabId} (${cwd})`)
+        clearInterval(watcher)
+        tabCodexSessionWatchers.delete(tabId)
+        return
+      }
+    } catch { /* ignore */ }
+  }, 1000)
+
+  tabCodexSessionWatchers.set(tabId, watcher)
+  setTimeout(() => {
+    const w = tabCodexSessionWatchers.get(tabId)
+    if (w === watcher) { clearInterval(watcher); tabCodexSessionWatchers.delete(tabId) }
+  }, 60000)
+}
+
 // Check if a session file has actual conversation content
 function sessionHasConversation(sessionId: string, cwd: string): boolean {
   const encoded = cwd.replace(/\//g, '-')
@@ -1032,7 +1255,7 @@ function autoTitle(input: string): string {
 }
 
 function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
-  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGemini: false, geminiSessionFile: null as string | null, hadCodex: false, resuming: false, model: null as string | null, activeAgents: [] as ActiveAgent[] }
+  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGemini: false, geminiSessionFile: null as string | null, hadCodex: false, codexSessionId: null as string | null, resuming: false, model: null as string | null, activeAgents: [] as ActiveAgent[] }
   const prevProc = info.proc
 
   try {
@@ -1063,6 +1286,7 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
       }
       if (prevProc === 'codex') {
         info.hadCodex = false
+        info.codexSessionId = null
       }
       info.latestInput = ''
       tabInputBuf.delete(id)
@@ -1094,7 +1318,7 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
   })
 
   ptyProcesses.set(id, ptyProcess)
-  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null, hadCodex: false, resuming: false, model: null, activeAgents: [] })
+  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null, hadCodex: false, codexSessionId: null, resuming: false, model: null, activeAgents: [] })
   tabOrder.push(id)
 
   // Inject shell hook to emit OSC 7 on every prompt (cwd tracking without lsof).
@@ -1442,6 +1666,8 @@ function createWindow() {
     tabSessionWatchers.clear()
     for (const w of tabGeminiSessionWatchers.values()) clearInterval(w)
     tabGeminiSessionWatchers.clear()
+    for (const w of tabCodexSessionWatchers.values()) clearInterval(w)
+    tabCodexSessionWatchers.clear()
     tabOrder.length = 0
     tabCounter = 0
     closedTabsHistory.length = 0
@@ -1458,7 +1684,7 @@ function createWindow() {
       if (sessionId && sessionHasConversation(sessionId, closingInfo.cwd || HOME)) {
         closedTabsHistory.unshift({
           issue: closingInfo.issue, cwd: closingInfo.cwd || HOME,
-          claudeSessionId: sessionId, agent: 'claude', closedAt: Date.now(),
+          claudeSessionId: sessionId, codexSessionId: null, agent: 'claude', closedAt: Date.now(),
           model: closingInfo.model,
         })
         if (closedTabsHistory.length > 10) closedTabsHistory.pop()
@@ -1468,15 +1694,18 @@ function createWindow() {
       if (sessionFile) {
         closedTabsHistory.unshift({
           issue: closingInfo.issue, cwd: closingInfo.cwd || HOME,
-          claudeSessionId: null, agent: 'gemini', closedAt: Date.now(),
+          claudeSessionId: null, codexSessionId: null, agent: 'gemini', closedAt: Date.now(),
           model: null,
         })
         if (closedTabsHistory.length > 10) closedTabsHistory.pop()
       }
     } else if (closingInfo?.hadCodex) {
+      const codexSessionId = isCodexUuid(closingInfo.codexSessionId)
+        ? closingInfo.codexSessionId
+        : getLastCodexSessionId(closingInfo.cwd || HOME)
       closedTabsHistory.unshift({
         issue: closingInfo.issue, cwd: closingInfo.cwd || HOME,
-        claudeSessionId: null, agent: 'codex', closedAt: Date.now(),
+        claudeSessionId: null, codexSessionId, agent: 'codex', closedAt: Date.now(),
         model: null,
       })
       if (closedTabsHistory.length > 10) closedTabsHistory.pop()
@@ -1496,6 +1725,8 @@ function createWindow() {
     tabAgentOscBuf.delete(tabId)
     const sw = tabSessionWatchers.get(tabId)
     if (sw) { clearInterval(sw); tabSessionWatchers.delete(tabId) }
+    const cw = tabCodexSessionWatchers.get(tabId)
+    if (cw) { clearInterval(cw); tabCodexSessionWatchers.delete(tabId) }
     const idx = tabOrder.indexOf(tabId)
     if (idx !== -1) tabOrder.splice(idx, 1)
     const proc = ptyProcesses.get(tabId)
@@ -1526,7 +1757,7 @@ function createWindow() {
 
   // Remove an entry from closed history after restore
   ipcMain.on('terminal:remove-closed-history', (_event: Electron.IpcMainEvent, sessionId: string) => {
-    const idx = closedTabsHistory.findIndex((e) => e.claudeSessionId === sessionId)
+    const idx = closedTabsHistory.findIndex((e) => e.claudeSessionId === sessionId || e.codexSessionId === sessionId)
     if (idx !== -1) closedTabsHistory.splice(idx, 1)
   })
 
@@ -1593,7 +1824,17 @@ function createWindow() {
         // Detect "codex" command being launched from shell
         if (/^codex(\s|$)/.test(input)) {
           info.hadCodex = true
+          // If resuming a specific session ("codex resume <uuid>"), keep that ID as
+          // the fallback; the watcher overwrites it with the new rollout's UUID once
+          // codex forks the conversation into a fresh rollout file.
+          const resumeMatch = input.match(/\bresume\s+([0-9a-f-]{36})\b/i)
+          if (resumeMatch && isCodexUuid(resumeMatch[1])) {
+            info.codexSessionId = resumeMatch[1]
+            // Suppress [[SEND:]] detection during resume replay
+            tabResumeCooldown.set(tabId, Date.now() + RESUME_COOLDOWN_MS)
+          }
           tabInfo.set(tabId, info)
+          startCodexSessionWatch(tabId, info.cwd || HOME)
         }
 
         // Detect "claude" command being launched from shell → snapshot NOW before file is created
@@ -1844,7 +2085,8 @@ function createWindow() {
     shell.openExternal(url)
   })
 
-  // Resume sessions: list Claude session files from ~/.claude/projects/
+  // Resume sessions: merged list of Claude sessions (~/.claude/projects/) and
+  // Codex sessions (~/.codex/sessions/), tagged with agent: 'claude' | 'codex'.
   ipcMain.handle('resume:list-sessions', async (_event, projectDirs: string[] | null) => {
     const claudeDir = path.join(os.homedir(), '.claude', 'projects')
     let dirs: string[]
@@ -1866,6 +2108,8 @@ function createWindow() {
       projectDir: string
       updatedAt: number
       sizeBytes: number
+      agent: 'claude' | 'codex'
+      cwd?: string
     }> = []
 
     for (const dir of dirs) {
@@ -1912,9 +2156,33 @@ function createWindow() {
           projectDir: dir,
           updatedAt: stat.mtimeMs,
           sizeBytes: stat.size,
+          agent: 'claude',
         })
       }
     }
+
+    // Codex sessions. The projectDirs filter (encoded ~/.claude/projects dir
+    // names) is applied by re-encoding each rollout's cwd with the same
+    // deterministic one-way transform Claude Code uses (non-alphanumeric → '-')
+    // and matching against basename(projectDir).
+    try {
+      const encodeCwd = (cwd: string) => cwd.replace(/[^a-zA-Z0-9]/g, '-')
+      const wantedEncoded = projectDirs && projectDirs.length > 0
+        ? new Set(projectDirs.map((d) => path.basename(d)))
+        : null
+      for (const s of listCodexSessions()) {
+        if (wantedEncoded && !wantedEncoded.has(encodeCwd(s.cwd))) continue
+        sessions.push({
+          id: s.id,
+          title: s.title,
+          projectDir: s.cwd,
+          updatedAt: s.updatedAt,
+          sizeBytes: s.sizeBytes,
+          agent: 'codex',
+          cwd: s.cwd,
+        })
+      }
+    } catch { /* codex listing is best-effort */ }
 
     sessions.sort((a, b) => b.updatedAt - a.updatedAt)
     return sessions

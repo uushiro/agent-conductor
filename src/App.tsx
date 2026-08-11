@@ -238,7 +238,7 @@ export function App() {
         <Sidebar
           activeTabId={activeTabId}
           onTabSelect={selectTab}
-          onResumeSession={(sessionId) => tabsRef.current?.resumeSession(sessionId)}
+          onResumeSession={(sessionId, agent, cwd) => tabsRef.current?.resumeSession(sessionId, agent, cwd)}
           fileTreeVisible={fileTreeVisible}
           onToggleFileTree={() => updateSettings({ fileTreeVisible: !fileTreeVisible })}
           width={sidebarWidth}

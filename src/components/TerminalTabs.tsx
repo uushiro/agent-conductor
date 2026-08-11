@@ -5,7 +5,7 @@ import { useLang, strings } from '../contexts/LangContext'
 
 export interface TerminalTabsHandle {
   sendToNewTab: (prompt: string, agent: 'claude' | 'gemini' | 'codex') => void
-  resumeSession: (sessionId: string) => void
+  resumeSession: (sessionId: string, agent: 'claude' | 'codex', cwd?: string) => void
 }
 
 // In-tab worker agent reported via [[AGENT: label :: model :: started|done]] markers.
@@ -46,9 +46,21 @@ interface ClosedEntry {
   issue: string
   cwd: string
   claudeSessionId: string | null
+  codexSessionId: string | null
   agent: 'claude' | 'gemini' | 'codex'
   closedAt: number
   model: string | null
+}
+
+// Security guard: rollout-file-derived strings must be UUID-shaped before they are
+// interpolated into a PTY command ("codex resume <id>"). Anything else falls back
+// to a plain "codex" launch. Deliberately NOT "codex resume --last": that picks the
+// global most-recent session without any cwd filter and could resume an unrelated
+// conversation.
+const CODEX_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function codexResumeCmd(sessionId: string | null | undefined): string {
+  return sessionId && CODEX_UUID_RE.test(sessionId) ? `codex resume ${sessionId}\r` : 'codex\r'
 }
 
 // Claude model badge definitions (color dot + 1-letter abbreviation on tabs).
@@ -143,7 +155,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       const restored: Tab[] = []
       const claudeResumes: Array<{ tabId: string; sessionId: string | null; model: string | null }> = []
       const geminiResumes: Array<{ tabId: string }> = []
-      const codexResumes: Array<{ tabId: string }> = []
+      const codexResumes: Array<{ tabId: string; sessionId: string | null }> = []
       for (const saved of session.tabs) {
         const tabId = await window.electronAPI.createTerminal(
           saved.cwd,
@@ -157,7 +169,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         } else if (saved.hadGemini) {
           geminiResumes.push({ tabId })
         } else if (saved.hadCodex) {
-          codexResumes.push({ tabId })
+          codexResumes.push({ tabId, sessionId: saved.codexSessionId ?? null })
         }
         const willResume = saved.hadClaude || saved.hadGemini || saved.hadCodex
         restored.push({
@@ -193,11 +205,12 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         }, claudeOffset + i * 2000)
       })
 
-      // Auto-resume Codex tabs (after all Gemini resumes)
+      // Auto-resume Codex tabs (after all Gemini resumes).
+      // With a saved session UUID → "codex resume <uuid>"; otherwise a fresh "codex".
       const geminiOffset = claudeOffset + geminiResumes.length * 2000
-      codexResumes.forEach(({ tabId }, i) => {
+      codexResumes.forEach(({ tabId, sessionId }, i) => {
         setTimeout(() => {
-          window.electronAPI.sendTerminalInput(tabId, 'codex\r')
+          window.electronAPI.sendTerminalInput(tabId, codexResumeCmd(sessionId))
         }, geminiOffset + i * 2000)
       })
     } else {
@@ -445,15 +458,23 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     sendToNewTab: (prompt: string, agent: 'claude' | 'gemini' | 'codex') => {
       createTab(agent, prompt)
     },
-    resumeSession: async (sessionId: string) => {
-      const tabId = await window.electronAPI.createTerminal(undefined, sessionId)
+    resumeSession: async (sessionId: string, agent: 'claude' | 'codex', cwd?: string) => {
+      // claude: pendingSessionId drives main-side cwd resolution from the
+      // session file. codex has no such mapping — open the terminal directly
+      // in the rollout's cwd (from the resume list) and resume by UUID.
+      const tabId = agent === 'codex'
+        ? await window.electronAPI.createTerminal(cwd)
+        : await window.electronAPI.createTerminal(undefined, sessionId)
       setTabs((prev) => [
         ...prev,
         { id: tabId, issue: '', detail: 'Terminal', customIssue: false, resuming: true, model: null, activeAgents: [], agentStatus: 'none', promptChoices: [] },
       ])
       onActiveTabChange(tabId)
       setTimeout(() => {
-        window.electronAPI.sendTerminalInput(tabId, `claude --resume ${sessionId}\r`)
+        const cmd = agent === 'codex'
+          ? codexResumeCmd(sessionId)
+          : `claude --resume ${sessionId}\r`
+        window.electronAPI.sendTerminalInput(tabId, cmd)
       }, 1000)
     },
   }), [createTab, onActiveTabChange])
@@ -493,6 +514,8 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       setShowRestoreMenu(false)
       if (entry.claudeSessionId) {
         window.electronAPI.removeClosedHistory(entry.claudeSessionId)
+      } else if (entry.codexSessionId) {
+        window.electronAPI.removeClosedHistory(entry.codexSessionId)
       }
       const tabId = await window.electronAPI.createTerminal(
         entry.cwd,
@@ -511,7 +534,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         const cmd = entry.agent === 'gemini'
           ? 'gemini --resume latest\r'
           : entry.agent === 'codex'
-          ? 'codex\r'
+          ? codexResumeCmd(entry.codexSessionId)
           : entry.claudeSessionId ? `claude${modelFlag} --resume ${entry.claudeSessionId}\r` : `claude${modelFlag}\r`
         window.electronAPI.sendTerminalInput(tabId, cmd)
       }, 1000)

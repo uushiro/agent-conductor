@@ -8,11 +8,19 @@ interface ResumeSession {
   projectDir: string
   updatedAt: number
   sizeBytes: number
+  agent: 'claude' | 'codex'
+  cwd?: string
+}
+
+// Agent glyphs shared with the "+" agent menu in TerminalTabs (agent-icon class)
+const AGENT_ICONS: Record<ResumeSession['agent'], string> = {
+  claude: '◆',
+  codex: '⬡',
 }
 
 interface Props {
   projectDirs: string[]
-  onResumeSession: (sessionId: string) => void
+  onResumeSession: (sessionId: string, agent: 'claude' | 'codex', cwd?: string) => void
 }
 
 function timeAgo(ms: number): string {
@@ -99,12 +107,15 @@ export function ResumeWidget({ projectDirs, onResumeSession }: Props) {
         {!loading && filtered.length === 0 && <div className="resume-empty">No sessions</div>}
         {!loading && filtered.map((s) => (
           <div
-            key={s.id}
+            key={`${s.agent}:${s.id}`}
             className="resume-item"
-            onClick={() => onResumeSession(s.id)}
+            onClick={() => onResumeSession(s.id, s.agent, s.cwd)}
             title={s.title}
           >
-            <span className="resume-title">{s.title}</span>
+            <span className="resume-item-head">
+              <span className="agent-icon">{AGENT_ICONS[s.agent]}</span>
+              <span className="resume-title">{s.title}</span>
+            </span>
             <span className="resume-meta">{timeAgo(s.updatedAt)} · {formatSize(s.sizeBytes)}</span>
           </div>
         ))}

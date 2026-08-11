@@ -8,6 +8,7 @@ export interface ClosedTabEntry {
   issue: string
   cwd: string
   claudeSessionId: string | null
+  codexSessionId: string | null
   agent: 'claude' | 'gemini' | 'codex'
   closedAt: number
   model: string | null
@@ -54,7 +55,7 @@ export interface TabInfo {
 }
 
 export interface SavedSession {
-  tabs: Array<{ issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null; hadGemini: boolean; hadCodex: boolean; model: string | null }>
+  tabs: Array<{ issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null; hadGemini: boolean; hadCodex: boolean; codexSessionId: string | null; model: string | null }>
   activeIndex: number
 }
 
@@ -96,6 +97,7 @@ export interface ElectronAPI {
   pasteToWindow: () => Promise<void>
   listResumeSessions: (projectDirs: string[] | null) => Promise<Array<{
     id: string; title: string; projectDir: string; updatedAt: number; sizeBytes: number
+    agent: 'claude' | 'codex'; cwd?: string
   }>>
 }
 

@@ -114,5 +114,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listResumeSessions: (projectDirs: string[] | null) =>
     ipcRenderer.invoke('resume:list-sessions', projectDirs) as Promise<Array<{
       id: string; title: string; projectDir: string; updatedAt: number; sizeBytes: number
+      agent: 'claude' | 'codex'; cwd?: string
     }>>,
 })
