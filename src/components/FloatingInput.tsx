@@ -21,6 +21,7 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
   const t = strings[lang]
   const [text, setText] = useState('')
   const [attachments, setAttachments] = useState<string[]>([])
+  const [tuiMenuOpen, setTuiMenuOpen] = useState(false)
   const currentHeightRef = useRef(() => {
     const saved = localStorage.getItem(STORAGE_KEY)
     return saved ? Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, Number(saved))) : 100
@@ -28,6 +29,7 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const attachmentsRef = useRef<HTMLDivElement>(null)
   const barRef = useRef<HTMLDivElement>(null)
+  const tuiMenuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const bar = barRef.current
@@ -51,8 +53,23 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
   useEffect(() => {
     if (visible) {
       setTimeout(() => textareaRef.current?.focus(), 50)
+    } else {
+      setTuiMenuOpen(false)
     }
   }, [visible])
+
+  useEffect(() => {
+    setTuiMenuOpen(false)
+  }, [activeTabId])
+
+  useEffect(() => {
+    if (!tuiMenuOpen) return
+    const handlePointerDown = (e: MouseEvent) => {
+      if (!tuiMenuRef.current?.contains(e.target as Node)) setTuiMenuOpen(false)
+    }
+    document.addEventListener('mousedown', handlePointerDown)
+    return () => document.removeEventListener('mousedown', handlePointerDown)
+  }, [tuiMenuOpen])
 
   useEffect(() => {
     onHeightChange?.(currentHeightRef.current())
@@ -145,10 +162,32 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Escape') {
+      if (tuiMenuOpen) {
+        e.preventDefault()
+        setTuiMenuOpen(false)
+        return
+      }
       onClose()
       return
     }
     if (e.nativeEvent.isComposing) return
+
+    const hasNoModifiers = !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey
+    const canForwardTuiKey = text.length === 0 && attachments.length === 0 && hasNoModifiers
+    const tuiKeySequence = e.key === 'ArrowUp'
+      ? '\x1b[A'
+      : e.key === 'ArrowDown'
+      ? '\x1b[B'
+      : e.key === 'Enter'
+      ? '\r'
+      : null
+
+    if (canForwardTuiKey && tuiKeySequence) {
+      e.preventDefault()
+      window.electronAPI.sendTerminalInput(activeTabId, tuiKeySequence)
+      return
+    }
+
     if (inputSendMode === 'enter' && e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       sendText()
@@ -168,6 +207,11 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
     }
   }, [])
 
+  const sendTuiKey = useCallback((sequence: string) => {
+    window.electronAPI.sendTerminalInput(activeTabId, sequence)
+    setTimeout(() => textareaRef.current?.focus(), 0)
+  }, [activeTabId])
+
   const placeholder =
     inputSendMode === 'enter'
       ? t.inputPlaceholderEnter
@@ -180,23 +224,36 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
       <div ref={barRef} className="terminal-input-bar">
         <div className="terminal-input-resize-handle" onMouseDown={handleResizeMouseDown} />
         <div className="terminal-input-inner">
-          <div className="terminal-approval-controls" role="group" aria-label="ターミナルUIの操作">
-            <span>TUI操作</span>
+          <div ref={tuiMenuRef} className="terminal-tui-menu">
             <button
               type="button"
-              title="ターミナルへ上矢印キーを送る"
-              onClick={() => window.electronAPI.sendTerminalInput(activeTabId, '\x1b[A')}
-            >↑</button>
-            <button
-              type="button"
-              title="ターミナルへ下矢印キーを送る"
-              onClick={() => window.electronAPI.sendTerminalInput(activeTabId, '\x1b[B')}
-            >↓</button>
-            <button
-              type="button"
-              title="ターミナルへEnterキーを送る"
-              onClick={() => window.electronAPI.sendTerminalInput(activeTabId, '\r')}
-            >決定</button>
+              className={`terminal-tui-menu-trigger${tuiMenuOpen ? ' terminal-tui-menu-trigger--open' : ''}`}
+              title="TUI操作（入力欄が空なら ↑ ↓ Enter をキーボードから操作できます）"
+              aria-label="TUI操作メニュー"
+              aria-expanded={tuiMenuOpen}
+              onClick={() => setTuiMenuOpen((open) => !open)}
+            >⌨</button>
+            {tuiMenuOpen && (
+              <div className="terminal-tui-menu-popover" role="group" aria-label="ターミナルUIの操作">
+                <span className="terminal-tui-menu-label">TUI操作</span>
+                <button
+                  type="button"
+                  title="ターミナルへ上矢印キーを送る"
+                  onClick={() => sendTuiKey('\x1b[A')}
+                >↑</button>
+                <button
+                  type="button"
+                  title="ターミナルへ下矢印キーを送る"
+                  onClick={() => sendTuiKey('\x1b[B')}
+                >↓</button>
+                <button
+                  type="button"
+                  title="ターミナルへEnterキーを送る"
+                  onClick={() => sendTuiKey('\r')}
+                >決定</button>
+                <span className="terminal-tui-menu-hint">空欄なら ↑ ↓ Enter</span>
+              </div>
+            )}
           </div>
           <div
             className="terminal-input-field"

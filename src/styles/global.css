@@ -1893,16 +1893,56 @@ html, body, #root {
   overflow: hidden;
 }
 
-.terminal-approval-controls {
+.terminal-tui-menu {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  flex: 0 0 auto;
+  z-index: 5;
+}
+
+.terminal-tui-menu-trigger {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.terminal-tui-menu-trigger:hover,
+.terminal-tui-menu-trigger--open {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border-color: var(--accent);
+}
+
+.terminal-tui-menu-popover {
+  position: absolute;
+  top: 0;
+  left: 34px;
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 0 0 auto;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
   color: var(--text-secondary);
   font-size: 12px;
+  white-space: nowrap;
 }
 
-.terminal-approval-controls button {
+.terminal-tui-menu-label {
+  padding: 0 2px;
+}
+
+.terminal-tui-menu-popover button {
   min-width: 30px;
   height: 28px;
   padding: 0 9px;
@@ -1913,9 +1953,14 @@ html, body, #root {
   cursor: pointer;
 }
 
-.terminal-approval-controls button:hover {
+.terminal-tui-menu-popover button:hover {
   background: var(--bg-secondary);
   border-color: var(--accent);
+}
+
+.terminal-tui-menu-hint {
+  color: var(--fg-subtle, #6e7681);
+  font-size: 11px;
 }
 
 .terminal-input-attachments {
