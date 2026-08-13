@@ -180,6 +180,24 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
       <div ref={barRef} className="terminal-input-bar">
         <div className="terminal-input-resize-handle" onMouseDown={handleResizeMouseDown} />
         <div className="terminal-input-inner">
+          <div className="terminal-approval-controls" role="group" aria-label="ターミナルUIの操作">
+            <span>TUI操作</span>
+            <button
+              type="button"
+              title="ターミナルへ上矢印キーを送る"
+              onClick={() => window.electronAPI.sendTerminalInput(activeTabId, '\x1b[A')}
+            >↑</button>
+            <button
+              type="button"
+              title="ターミナルへ下矢印キーを送る"
+              onClick={() => window.electronAPI.sendTerminalInput(activeTabId, '\x1b[B')}
+            >↓</button>
+            <button
+              type="button"
+              title="ターミナルへEnterキーを送る"
+              onClick={() => window.electronAPI.sendTerminalInput(activeTabId, '\r')}
+            >決定</button>
+          </div>
           <div
             className="terminal-input-field"
             data-has-attachments={attachments.length > 0 || undefined}
