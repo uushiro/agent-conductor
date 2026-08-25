@@ -1,6 +1,6 @@
 {
   "name": "agent-conductor",
-  "version": "2.14.2",
+  "version": "2.14.3",
   "description": "AI Agent Conductor for Claude Code",
   "author": "uushiro",
   "license": "MIT",
@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test": "node --test electron/*.test.mjs",
     "preview": "vite preview",
     "dist": "npm run build && electron-builder --mac -c.directories.output=/tmp/agent-conductor-dist"
   },

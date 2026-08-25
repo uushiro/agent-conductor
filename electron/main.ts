@@ -4,6 +4,7 @@ import os from 'node:os'
 import fs from 'node:fs'
 import https from 'node:https'
 import { execFile } from 'node:child_process'
+import { readClaudeSessionTitle } from './claude-session-title.mjs'
 
 // node-pty is a native module — require it
 const pty = require('node-pty')
@@ -681,6 +682,15 @@ const IS_DEV = process.env.NODE_ENV === 'development' || !!process.env.VITE_DEV_
 const SESSION_FILE = path.join(app.getPath('userData'), IS_DEV ? 'session-dev.json' : 'session.json')
 const SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json')
 const SESSION_TITLE_OVERRIDES_FILE = path.join(app.getPath('userData'), 'session-title-overrides.json')
+const claudeSessionTitleCache = new Map<string, { mtime: number; size: number; title: string | null }>()
+
+function cachedClaudeSessionTitle(filePath: string, stat: fs.Stats): string | null {
+  const cached = claudeSessionTitleCache.get(filePath)
+  if (cached && cached.mtime === stat.mtimeMs && cached.size === stat.size) return cached.title
+  const title = readClaudeSessionTitle(filePath)
+  claudeSessionTitleCache.set(filePath, { mtime: stat.mtimeMs, size: stat.size, title })
+  return title
+}
 
 // Get recent Claude session IDs for a cwd, sorted by most recent first
 function getRecentClaudeSessions(cwd: string): string[] {
@@ -2308,34 +2318,12 @@ function createWindow() {
         let stat: fs.Stats
         try { stat = fs.statSync(filePath) } catch { continue }
         const id = file.replace('.jsonl', '')
-        // Read first few KB to extract title (first user message)
-        let title = id
-        try {
-          const buf = Buffer.alloc(2048)
-          const fd = fs.openSync(filePath, 'r')
-          const bytesRead = fs.readSync(fd, buf, 0, 2048, 0)
-          fs.closeSync(fd)
-          const text = buf.toString('utf8', 0, bytesRead)
-          for (const line of text.split('\n')) {
-            if (!line.trim()) continue
-            try {
-              const obj = JSON.parse(line)
-              if (obj.type === 'user' && obj.parentUuid === null) {
-                const content = obj.message?.content
-                if (typeof content === 'string' && content.trim()) {
-                  title = content.trim().split('\n')[0].slice(0, 120)
-                } else if (Array.isArray(content)) {
-                  const textPart = content.find((c: { type: string; text?: string }) => c.type === 'text')
-                  if (textPart?.text) title = textPart.text.trim().split('\n')[0].slice(0, 120)
-                }
-                break
-              }
-            } catch { /* skip malformed lines */ }
-          }
-        } catch { /* skip on read error */ }
-
-        const automaticTitle = title
         const customTitle = titleOverrides[sessionTitleOverrideKey('claude', id)]
+        const extractedTitle = cachedClaudeSessionTitle(filePath, stat)
+        // Empty startup/bridge JSONL files are not resumable conversations and
+        // have no meaningful label. Do not surface them as UUID-only rows.
+        if (!extractedTitle && !customTitle) continue
+        const automaticTitle = extractedTitle || id
         sessions.push({
           id,
           title: customTitle || automaticTitle,
