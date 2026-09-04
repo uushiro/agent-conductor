@@ -44,7 +44,15 @@ const tabInfo = new Map<string, {
   cwd: string; proc: string; issue: string; latestInput: string
   claudeSessionId: string | null; claudeResumeParentId: string | null; hadClaude: boolean
   hadGemini: boolean; geminiSessionFile: string | null; hadCodex: boolean; codexSessionId: string | null; resuming: boolean
+  // Display model (tab badge). Last-wins from any source: --model input parse,
+  // stdout startup banner, hook-inherited markers. NEVER used to build a launch command.
   model: string | null
+  // Launch-flag model. Set ONLY when the user explicitly typed/chose `--model X`
+  // (model chip → `claude --model X`, or hand-typed). Banner detection must not touch it.
+  // This is what saveSession()/closed-history persist, so a plain `claude` launch that
+  // happened to run on Sonnet is not pinned to `--model sonnet` on the next restore
+  // (which would silently override the `model` default in ~/.claude/settings.json).
+  launchModel: string | null
   activeAgents: ActiveAgent[]
   // Manual rename waiting for the CLI watcher to discover a new session ID.
   pendingSessionTitle: string | null
@@ -73,6 +81,7 @@ interface ClosedTabEntry {
   codexSessionId: string | null
   agent: 'claude' | 'gemini' | 'codex'
   closedAt: number
+  // Launch-flag model (tabInfo.launchModel), replayed as `claude --model X` on reopen.
   model: string | null
 }
 const closedTabsHistory: ClosedTabEntry[] = []
@@ -667,10 +676,17 @@ interface SavedTab {
   hadGemini: boolean
   hadCodex: boolean
   codexSessionId: string | null
+  // Launch-flag model only (tabInfo.launchModel) — restored as `claude --model X`.
+  // The display model is not persisted; the banner re-detects it after restore.
   model: string | null
 }
 
+// schemaVersion 2 (v2.14.4): `model` is the explicit launch flag, not the banner-detected
+// display model. Files without schemaVersion are v1 and their `model` is untrusted.
+const SESSION_SCHEMA_VERSION = 2
+
 interface SavedSession {
+  schemaVersion?: number
   tabs: SavedTab[]
   activeIndex: number
 }
@@ -758,11 +774,12 @@ function saveSession() {
         codexSessionId: info.hadCodex
           ? (isCodexUuid(info.codexSessionId) ? info.codexSessionId : getLastCodexSessionId(info.cwd || HOME))
           : null,
-        model: info.model,
+        // Persist the launch flag, not the display model (see tabInfo.launchModel).
+        model: info.launchModel,
       })
     }
   }
-  const session: SavedSession = { tabs: tabs.slice(0, 15), activeIndex: 0 }
+  const session: SavedSession = { schemaVersion: SESSION_SCHEMA_VERSION, tabs: tabs.slice(0, 15), activeIndex: 0 }
   try {
     fs.writeFileSync(SESSION_FILE, JSON.stringify(session), 'utf-8')
   } catch { /* ignore */ }
@@ -772,7 +789,16 @@ function loadSession(): SavedSession | null {
   try {
     const raw = fs.readFileSync(SESSION_FILE, 'utf-8')
     const session = JSON.parse(raw) as SavedSession
-    if (session.tabs && session.tabs.length > 0) return session
+    if (session.tabs && session.tabs.length > 0) {
+      // One-time migration from v1: `model` there was the banner-detected display model
+      // (last-wins), so it cannot be trusted as an explicit user choice. Drop it and let
+      // the CLI default (~/.claude/settings.json) apply; the user re-picks via the model
+      // chip if they want a pin. The next saveSession() writes v2 with launchModel.
+      if ((session.schemaVersion ?? 1) < SESSION_SCHEMA_VERSION) {
+        for (const tab of session.tabs) tab.model = null
+      }
+      return session
+    }
   } catch { /* ignore */ }
   return null
 }
@@ -1430,7 +1456,7 @@ function autoTitle(input: string): string {
 }
 
 function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
-  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGemini: false, geminiSessionFile: null as string | null, hadCodex: false, codexSessionId: null as string | null, resuming: false, model: null as string | null, activeAgents: [] as ActiveAgent[], pendingSessionTitle: null as string | null }
+  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGemini: false, geminiSessionFile: null as string | null, hadCodex: false, codexSessionId: null as string | null, resuming: false, model: null as string | null, launchModel: null as string | null, activeAgents: [] as ActiveAgent[], pendingSessionTitle: null as string | null }
   const prevProc = info.proc
 
   try {
@@ -1454,6 +1480,7 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
         info.claudeSessionId = null
         info.claudeResumeParentId = null
         info.model = null
+        info.launchModel = null
         info.pendingSessionTitle = null
       }
       if (prevProc === 'gemini') {
@@ -1495,7 +1522,7 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
   })
 
   ptyProcesses.set(id, ptyProcess)
-  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null, hadCodex: false, codexSessionId: null, resuming: false, model: null, activeAgents: [], pendingSessionTitle: null })
+  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null, hadCodex: false, codexSessionId: null, resuming: false, model: null, launchModel: null, activeAgents: [], pendingSessionTitle: null })
   tabOrder.push(id)
 
   // Inject shell hook to emit OSC 7 on every prompt (cwd tracking without lsof).
@@ -1598,6 +1625,10 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
       }
       if (detected) {
         const info = tabInfo.get(id)
+        // Display-only: updates `info.model` (badge). Deliberately does NOT touch
+        // `info.launchModel` — the banner reflects whatever model claude picked
+        // (settings.json default included), not an explicit user choice, so it must
+        // never be persisted as a `--model` launch flag.
         if (info && info.model !== detected) {
           info.model = detected
           tabInfo.set(id, info)
@@ -1622,7 +1653,9 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
           info.claudeResumeParentId = null
           info.hadClaude = true
           // Fallback retries with plain `claude` (no --model) → model is unknown
+          // and the explicit launch flag is gone too.
           info.model = null
+          info.launchModel = null
           tabInfo.set(id, info)
         }
         // Wait for error to finish printing, then retry with plain claude
@@ -1876,7 +1909,9 @@ function createWindow() {
         closedTabsHistory.unshift({
           issue: closingInfo.issue, cwd: closingInfo.cwd || HOME,
           claudeSessionId: sessionId, codexSessionId: null, agent: 'claude', closedAt: Date.now(),
-          model: closingInfo.model,
+          // Reopen from history replays `claude --model X --resume …`, so this must be
+          // the explicit launch flag, not the banner-detected display model.
+          model: closingInfo.launchModel,
         })
         if (closedTabsHistory.length > 10) closedTabsHistory.pop()
       }
@@ -2032,11 +2067,16 @@ function createWindow() {
         if (/^claude(\s|$)/.test(input)) {
           info.hadClaude = true
           // Machine-detect the model from the launch args (--model sonnet / --model=sonnet).
-          // Provisional (user intent, shown immediately); the stdout startup-banner
-          // detection overwrites it with the actually-selected model once claude prints it.
-          // No flag or unknown value → null until the banner is detected.
+          // This is the ONLY place that sets `info.launchModel` (explicit user choice:
+          // model chip, hand-typed flag, or our own restore/reopen command replay).
+          // `info.model` (badge) gets the same provisional value; the stdout startup-banner
+          // detection later overwrites `info.model` only, never `info.launchModel`.
+          // No flag or unknown value → both null (badge fills in once the banner is detected;
+          // launchModel stays null so the CLI/settings.json default is respected on restore).
           const modelMatch = input.match(/--model[=\s]+(\S+)/)
-          info.model = modelMatch ? normalizeClaudeModel(modelMatch[1]) : null
+          const explicitModel = modelMatch ? normalizeClaudeModel(modelMatch[1]) : null
+          info.launchModel = explicitModel
+          info.model = explicitModel
           // If resuming a specific session, save the ID directly
           const resumeMatch = input.match(/--resume\s+([a-f0-9-]{36})/)
           if (resumeMatch) {

@@ -195,6 +195,8 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       onActiveTabChange(restored[activeIdx]?.id || restored[0]?.id || '')
 
       // Auto-resume Claude tabs (3000ms stagger to prevent cross-tab session mixing)
+      // `model` here is saved.model = main's tabInfo.launchModel (explicit user choice only,
+      // never the banner-detected display model), so no flag → CLI/settings.json default.
       claudeResumes.forEach(({ tabId, sessionId, model }, i) => {
         setTimeout(() => {
           const modelFlag = model ? ` --model ${model}` : ''
@@ -537,6 +539,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       ])
       onActiveTabChange(tabId)
       setTimeout(() => {
+        // entry.model is the explicit launch flag (main's launchModel), not the badge model.
         const modelFlag = entry.model ? ` --model ${entry.model}` : ''
         const cmd = entry.agent === 'gemini'
           ? 'gemini --resume latest\r'
