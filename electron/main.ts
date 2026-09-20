@@ -1506,7 +1506,11 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
   const id = `tab-${++tabCounter}`
   const shell = process.env.SHELL || (os.platform() === 'win32' ? 'powershell.exe' : 'zsh')
   const initialCwd = cwd || HOME
-  const ptyProcess = pty.spawn(shell, [], {
+  // Spawn as a login shell (like Terminal.app) so ~/.zprofile / ~/.bash_profile
+  // are sourced. Without this, PATH set only there (e.g. the codex installer's
+  // ~/.local/bin entry) is missing and the CLI appears as "command not found".
+  const shellArgs = ['zsh', 'bash', 'fish', 'sh'].includes(path.basename(shell)) ? ['-l'] : []
+  const ptyProcess = pty.spawn(shell, shellArgs, {
     name: 'xterm-256color',
     cols: 80,
     rows: 24,
