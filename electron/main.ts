@@ -11,6 +11,7 @@ import { findSessionNotes } from './handoff-notes.mjs'
 import { execFile } from 'node:child_process'
 import { readClaudeSessionTitle } from './claude-session-title.mjs'
 import { SESSION_SCHEMA_VERSION, consumeOsc7, exactClaudeSessionId, exactCodexSessionId, mergeRestoreSnapshot, savedResumeCommand, selectedIndex } from './session-resume.mjs'
+import { codexMetaFromSessionRecord, isInteractiveCodexMeta as isInteractiveCodexMetaRecord, isSubagentCodexMeta, resolveCodexSessionLineage } from './codex-session-lineage.mjs'
 
 // node-pty is a native module — require it
 const pty = require('node-pty')
@@ -30,6 +31,10 @@ let quitConfirmPending = false
 let quitConfirmTimer: ReturnType<typeof setTimeout> | null = null
 
 const SHELLS = new Set(['zsh', 'bash', 'fish', 'sh', 'login'])
+
+function normalizeProcessName(raw: string): string {
+  return path.basename(raw).toLowerCase().replace(/\.exe$/, '')
+}
 
 // Map of tabId → pty instance
 const ptyProcesses = new Map<string, ReturnType<typeof pty.spawn>>()
@@ -1010,10 +1015,12 @@ const CODEX_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 const CODEX_ROLLOUT_RE = /^rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i
 
 interface CodexRolloutInfo {
+  id: string | null
   cwd: string | null
   preview: string | null
   source: unknown
   originator: string | null
+  parentThreadId: string | null
 }
 
 const codexRolloutInfoCache = new Map<string, { mtime: number; size: number; info: CodexRolloutInfo }>()
@@ -1136,6 +1143,43 @@ function listCodexRollouts(dir: string): Array<{ path: string; uuid: string; mti
   return out
 }
 
+function listAllCodexRollouts(maxFiles = 10000): Array<{ path: string; uuid: string; mtime: number; size: number }> {
+  const root = path.join(HOME, '.codex', 'sessions')
+  const numericDirs = (dir: string): string[] => {
+    try { return fs.readdirSync(dir).filter(name => /^\d+$/.test(name)).sort().reverse().map(name => path.join(dir, name)) }
+    catch { return [] }
+  }
+  const out: Array<{ path: string; uuid: string; mtime: number; size: number }> = []
+  outer: for (const year of numericDirs(root)) {
+    for (const month of numericDirs(year)) {
+      for (const day of numericDirs(month)) {
+        for (const entry of listCodexRollouts(day)) {
+          out.push(entry)
+          if (out.length >= maxFiles) break outer
+        }
+      }
+    }
+  }
+  return out
+}
+
+function resolveCodexSessionForCwd(sessionId: string, cwd: string) {
+  const metas = listAllCodexRollouts().map(entry => {
+    const info = readCodexRolloutInfo(entry.path, entry.mtime, entry.size)
+    return { ...info, fileId: entry.uuid }
+  })
+  return resolveCodexSessionLineage(sessionId, cwd, metas, 8)
+}
+
+function codexResumeFailureReason(code: string): string {
+  if (code === 'subagent_parent_missing' || code === 'parent_missing' || code === 'lineage_cycle' || code === 'lineage_too_deep') {
+    return '保存されたCodex IDはguardian/subagentの会話ですが、復元可能な親会話を検証できません。'
+  }
+  if (code === 'cwd_mismatch') return '保存されたCodex会話の作業フォルダが一致しません。'
+  if (code === 'not_interactive') return '保存されたCodex IDは対話型の会話ではありません。'
+  return '保存されたCodexの会話ファイルが見つかりません。'
+}
+
 // Read cwd + a preview (first real user message) and source from a rollout file head.
 // Bounded read (512KB): the first line holds session_meta.payload.cwd; later
 // response_item lines with payload.role === 'user' hold user messages, but the
@@ -1155,10 +1199,12 @@ function readCodexRolloutInfo(filePath: string, knownMtime?: number, knownSize?:
   if (cached && cached.mtime === mtime && cached.size === size) return cached.info
 
   let fd: number | null = null
+  let id: string | null = null
   let cwd: string | null = null
   let preview: string | null = null
   let source: unknown = null
   let originator: string | null = null
+  let parentThreadId: string | null = null
   try {
     fd = fs.openSync(filePath, 'r')
     const buf = Buffer.alloc(512 * 1024)
@@ -1168,11 +1214,12 @@ function readCodexRolloutInfo(filePath: string, knownMtime?: number, knownSize?:
     // First line: session_meta with cwd
     try {
       const meta = JSON.parse(lines[0])
-      const c = meta?.payload?.cwd ?? meta?.session_meta?.payload?.cwd
-      if (typeof c === 'string') cwd = c
-      source = meta?.payload?.source ?? meta?.session_meta?.payload?.source ?? null
-      const o = meta?.payload?.originator ?? meta?.session_meta?.payload?.originator
-      if (typeof o === 'string') originator = o
+      const canonical = codexMetaFromSessionRecord(meta, '')
+      id = canonical.id
+      cwd = canonical.cwd
+      source = canonical.source
+      originator = canonical.originator
+      parentThreadId = canonical.parentThreadId
     } catch { /* ignore */ }
     if (cwd === null) {
       const m = (lines[0] ?? '').match(/"cwd"\s*:\s*("(?:[^"\\]|\\.)*")/)
@@ -1201,7 +1248,7 @@ function readCodexRolloutInfo(filePath: string, knownMtime?: number, knownSize?:
   } catch { /* ignore */ } finally {
     if (fd !== null) { try { fs.closeSync(fd) } catch { /* ignore */ } }
   }
-  const info = { cwd, preview, source, originator }
+  const info = { id, cwd, preview, source, originator, parentThreadId }
   if (mtime !== undefined && size !== undefined) codexRolloutInfoCache.set(filePath, { mtime, size, info })
   return info
 }
@@ -1236,12 +1283,7 @@ function readCodexHistoryTitles(): Map<string, string> | null {
 }
 
 function isInteractiveCodexRollout(source: unknown, originator: string | null): boolean {
-  if (typeof source === 'string') return source === 'cli' || source === 'vscode'
-  // Object-valued sources identify subagents/background helpers in current
-  // Codex rollouts. For older files with no source, accept known interactive
-  // originators as a best-effort fallback.
-  if (source && typeof source === 'object') return false
-  return !!originator && /^(codex-tui|codex_cli_rs|codex_chatgpt.*remote)$/i.test(originator)
+  return isInteractiveCodexMetaRecord({ id: null, fileId: '', cwd: null, source, originator, parentThreadId: null })
 }
 
 // List ALL codex sessions across every date dir under ~/.codex/sessions
@@ -1264,7 +1306,8 @@ function listCodexSessions(cwdFilter?: string | null): Array<{
       for (const dayDir of numericDirs(monthDir)) {
         for (const entry of listCodexRollouts(dayDir)) {
           if (!isCodexUuid(entry.uuid)) continue
-          const { cwd, preview, source, originator } = readCodexRolloutInfo(entry.path, entry.mtime, entry.size)
+          const { id, cwd, preview, source, originator } = readCodexRolloutInfo(entry.path, entry.mtime, entry.size)
+          if (!id || id.toLowerCase() !== entry.uuid.toLowerCase()) continue
           if (cwd === null) continue
           if (cwdFilter && cwd !== cwdFilter) continue
           const historyTitle = historyTitles?.get(entry.uuid.toLowerCase())
@@ -1303,7 +1346,9 @@ function getLastCodexSessionId(cwd: string): string | null {
   // Bound the number of first-line reads to keep this cheap
   for (const c of candidates.slice(0, 50)) {
     if (!isCodexUuid(c.uuid)) continue
-    if (readCodexRolloutCwd(c.path) === cwd) return c.uuid
+    const meta = readCodexRolloutInfo(c.path, c.mtime, c.size)
+    if (meta.id?.toLowerCase() !== c.uuid.toLowerCase() || meta.cwd !== cwd) continue
+    if (isInteractiveCodexRollout(meta.source, meta.originator)) return c.uuid
   }
   return null
 }
@@ -1337,9 +1382,14 @@ function startCodexSessionWatch(tabId: string, cwd: string) {
       const matches: Array<{ path: string; uuid: string; mtime: number }> = []
       for (const e of newFiles) {
         if (!isCodexUuid(e.uuid)) { knownFiles.add(e.path); continue }
-        const fileCwd = readCodexRolloutCwd(e.path)
-        if (fileCwd === null) continue // first line may not be flushed yet — retry next tick
-        if (fileCwd !== cwd) { knownFiles.add(e.path); continue } // another project's session
+        const meta = readCodexRolloutInfo(e.path, e.mtime, e.size)
+        if (meta.id === null || meta.cwd === null) continue // first line may not be flushed yet — retry next tick
+        if (meta.id.toLowerCase() !== e.uuid.toLowerCase() || meta.cwd !== cwd) { knownFiles.add(e.path); continue }
+        if (!isInteractiveCodexRollout(meta.source, meta.originator)) {
+          if (isSubagentCodexMeta({ ...meta, fileId: e.uuid })) console.log(`[codex-session] ignored subagent ${e.uuid} for ${tabId}`)
+          knownFiles.add(e.path)
+          continue
+        }
         matches.push(e)
       }
       if (matches.length > 1) {
@@ -1507,14 +1557,14 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
   const prevProc = info.proc
 
   try {
-    info.proc = ptyProcess.process || ''
+    info.proc = normalizeProcessName(ptyProcess.process || '')
   } catch { /* ignore */ }
 
   // When process changes (shell↔app), clear output buffer
   if (prevProc !== info.proc) {
     tabLastOutput.delete(id)
     tabLastOutputAt.delete(id)
-    if (SHELLS.has(prevProc) && !SHELLS.has(info.proc) && info.proc !== '') {
+    if ((prevProc === '' || SHELLS.has(prevProc)) && !SHELLS.has(info.proc) && info.proc !== '') {
       // Shell → agent: mark appropriate flag (session watch started at input time)
       if (info.proc === 'claude') info.hadClaude = true
       if (info.proc === 'gemini') info.hadGemini = true
@@ -2215,36 +2265,46 @@ function createWindow() {
   ipcMain.handle('terminal:create', (event, cwd?: string, pendingSessionId?: string, pendingAgent: ResumableAgent | 'gemini' = 'claude', restoreIndex?: number) => {
     if (!mainWindow || event.sender?.isDestroyed?.()) throw new Error('ウィンドウが閉じられたため端末の作成を中止しました。')
     const saved = Number.isInteger(restoreIndex) && restoreIndex! >= 0 ? loadedSessionSnapshot?.tabs[restoreIndex!] : undefined
+    let savedForRestore = saved
+    if (saved?.hadCodex && saved.codexSessionId) {
+      const resolved = resolveCodexSessionForCwd(saved.codexSessionId, saved.cwd)
+      if (resolved.ok && resolved.migrated) {
+        savedForRestore = { ...saved, codexSessionId: resolved.id }
+        loadedSessionSnapshot!.tabs[restoreIndex!] = savedForRestore
+        copySessionTitleOverride('codex', saved.codexSessionId, resolved.id)
+        console.log(`[codex-session] migrated saved subagent ${saved.codexSessionId} to interactive parent ${resolved.id}`)
+      }
+    }
     let id: string
     let cwdFailure = false
-    if (saved) {
-      try { cwdFailure = !fs.statSync(saved.cwd).isDirectory() }
+    if (savedForRestore) {
+      try { cwdFailure = !fs.statSync(savedForRestore.cwd).isDirectory() }
       catch { cwdFailure = true }
     }
     try { ({ id } = spawnPty(cwdFailure ? HOME : cwd)) }
     catch (error) {
-      if (!saved) throw error
+      if (!savedForRestore) throw error
       ;({ id } = spawnPty(HOME))
       cwdFailure = true
     }
     sessionStateDisposed = false
     const info = tabInfo.get(id)!
-    if (saved) {
+    if (savedForRestore) {
       tabRestoreIndexes.set(id, restoreIndex!)
-      tabSavedResumeDescriptors.set(id, { ...saved })
-      info.hadClaude = saved.hadClaude
-      info.claudeSessionId = saved.claudeSessionId
-      info.claudeResumeParentId = saved.claudeSessionId
-      info.hadGemini = saved.hadGemini
-      info.geminiSessionFile = saved.geminiSessionFile ?? null
-      info.hadCodex = saved.hadCodex
-      info.codexSessionId = saved.codexSessionId
-      info.launchModel = saved.model ?? null
-      info.model = saved.model ?? null
-      info.resuming = !!(saved.hadClaude || saved.hadGemini || saved.hadCodex)
-      if (cwdFailure) info.cwd = saved.cwd
+      tabSavedResumeDescriptors.set(id, { ...savedForRestore })
+      info.hadClaude = savedForRestore.hadClaude
+      info.claudeSessionId = savedForRestore.claudeSessionId
+      info.claudeResumeParentId = savedForRestore.claudeSessionId
+      info.hadGemini = savedForRestore.hadGemini
+      info.geminiSessionFile = savedForRestore.geminiSessionFile ?? null
+      info.hadCodex = savedForRestore.hadCodex
+      info.codexSessionId = savedForRestore.codexSessionId
+      info.launchModel = savedForRestore.model ?? null
+      info.model = savedForRestore.model ?? null
+      info.resuming = !!(savedForRestore.hadClaude || savedForRestore.hadGemini || savedForRestore.hadCodex)
+      if (cwdFailure) info.cwd = savedForRestore.cwd
       tabInfo.set(id, info)
-      if (cwdFailure) setResumeError(id, `作業フォルダ ${saved.cwd} を開けません。フォルダを復元してから再試行してください。`)
+      if (cwdFailure) setResumeError(id, `作業フォルダ ${savedForRestore.cwd} を開けません。フォルダを復元してから再試行してください。`)
     } else if (pendingSessionId || pendingAgent === 'codex' || pendingAgent === 'gemini') {
       if (pendingAgent === 'codex') {
         info.hadCodex = true
@@ -2276,10 +2336,26 @@ function createWindow() {
       info.resuming = true
     }
     const descriptor = tabSavedResumeDescriptors.get(tabId)
-    const resumeInfo = descriptor ? { ...info, ...descriptor, launchModel: descriptor.model, cwd: descriptor.cwd } : info
+    let resumeInfo = descriptor ? { ...info, ...descriptor, launchModel: descriptor.model, cwd: descriptor.cwd } : info
     if (descriptor && info.cwd !== descriptor.cwd) {
       const reason = `作業フォルダ ${descriptor.cwd} で端末を起動できていません。フォルダを復元し、アプリを再起動してください。`
       setResumeError(tabId, reason); return { ok: false, reason }
+    }
+    if (resumeInfo.hadCodex && resumeInfo.codexSessionId) {
+      const resolved = resolveCodexSessionForCwd(resumeInfo.codexSessionId, resumeInfo.cwd || HOME)
+      if (!resolved.ok) {
+        const reason = codexResumeFailureReason(resolved.code)
+        setResumeError(tabId, reason); return { ok: false, reason }
+      }
+      if (resolved.migrated) {
+        copySessionTitleOverride('codex', resumeInfo.codexSessionId, resolved.id)
+        resumeInfo = { ...resumeInfo, codexSessionId: resolved.id }
+        info.codexSessionId = resolved.id
+        if (descriptor) {
+          descriptor.codexSessionId = resolved.id
+          tabSavedResumeDescriptors.set(tabId, descriptor)
+        }
+      }
     }
     const result = savedResumeCommand(resumeInfo, HOME)
     if (!result.ok) { setResumeError(tabId, result.reason); return result }
@@ -2287,13 +2363,6 @@ function createWindow() {
     if (result.agent === 'claude' && !sessionHasConversation(exactClaudeSessionId(resumeInfo)!, resumeInfo.cwd || HOME)) {
       const reason = '保存されたClaudeの会話ファイルが見つからないか、会話内容を読み取れません。'
       setResumeError(tabId, reason); return { ok: false, reason }
-    }
-    if (result.agent === 'codex') {
-      const id = exactCodexSessionId(resumeInfo)!
-      if (!listCodexSessions(resumeInfo.cwd || HOME).some(session => session.id.toLowerCase() === id.toLowerCase())) {
-        const reason = '保存されたCodexの会話ファイルが見つからないか、作業フォルダが一致しません。'
-        setResumeError(tabId, reason); return { ok: false, reason }
-      }
     }
     if (result.agent === 'gemini') {
       try { if (!fs.statSync(resumeInfo.geminiSessionFile!).isFile()) throw new Error('not a file') }
@@ -2671,6 +2740,16 @@ function createWindow() {
         startCodexSessionWatch(tabId, inputInfo.cwd || HOME)
       }
     }
+    if (proc && isEnter && inputInfo && (!inputInfo.proc || SHELLS.has(inputInfo.proc))) {
+      const buffered = tabInputBuf.get(tabId) || ''
+      const batch = parsed !== '\r' ? parsed.split('\r')[0] : ''
+      const submitted = (buffered + batch).trim()
+      if (/^codex(\s|$)/.test(submitted) && !/\bresume\s+[0-9a-f-]{36}\b/i.test(submitted) && !tabCodexSessionWatchers.has(tabId)) {
+        // Snapshot before the command reaches the shell. Starting afterwards can
+        // miss the interactive parent and later bind a guardian rollout instead.
+        startCodexSessionWatch(tabId, inputInfo.cwd || HOME)
+      }
+    }
     if (proc) {
       proc.write(data)
     }
@@ -2718,7 +2797,7 @@ function createWindow() {
             tabResumeCooldown.set(tabId, Date.now() + RESUME_COOLDOWN_MS)
           }
           tabInfo.set(tabId, info)
-          if (!resumeMatch) startCodexSessionWatch(tabId, info.cwd || HOME)
+          if (!resumeMatch && !tabCodexSessionWatchers.has(tabId)) startCodexSessionWatch(tabId, info.cwd || HOME)
         }
 
         // Detect "claude" command being launched from shell → snapshot NOW before file is created
