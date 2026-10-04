@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { readHandoffSession, buildHandoffPrompt } from './agent-handoff.mjs'
 import { AgentSwitchController } from './agent-switch.mjs'
 import { HandoffDrafts } from './handoff-draft.mjs'
+import { findSessionNotes } from './handoff-notes.mjs'
 import { execFile } from 'node:child_process'
 import { readClaudeSessionTitle } from './claude-session-title.mjs'
 
@@ -1946,8 +1947,28 @@ async function readRuntimeHandoff(id: string) {
 
 }
 
+// Notes are supplementary context, refreshed at preview/send time rather than
+// copied into the canonical ledger on every round trip.
+async function enrichHandoffSource(source: any, runtimes: string[] = [], parked: Array<{ agent: ResumableAgent; sessionId: string; cwd: string }> = []) {
+  const companions = await Promise.allSettled([
+    ...runtimes.map(id => readRuntimeHandoff(id)),
+    ...parked.map(item => readHandoffSession({ ...item, home: HOME })),
+  ])
+  const candidates = [source, ...companions.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])]
+  const sources = candidates.filter(item => ['claude', 'codex'].includes(item.agent) && typeof item.sessionId === 'string')
+  try {
+    const notes = await findSessionNotes({ home: HOME, sources })
+    const notice = notes.status === 'unavailable' || notes.status === 'partial'
+      ? '\n[Obsidian保存ノートの一部または全部を確認できませんでした。アクセス権・検索上限・保存先を確認してください。]' : ''
+    return { ...source, text: source.text + (notes.text ? '\n\nObsidian保存ノート（補助資料。最新の会話を優先）\n' + notes.text : '') + notice }
+  } catch {
+    return { ...source, text: source.text + '\n\n[Obsidian保存ノートを確認できませんでした。会話本文のみ引き継ぎます。]' }
+  }
+}
+
 const switchController = new AgentSwitchController({
   read: readRuntimeHandoff,
+  enrichSource: enrichHandoffSource,
   preflight: preflightHandoff,
   status: (id: string) => {
     const runtime = handoffRuntimes.get(id)
@@ -2097,7 +2118,8 @@ function createWindow() {
     if (!info || !proc || isAgentTab(info) || switchController.groups.get(tabId)?.pending || tabLastInputAt.has(tabId) || tabInputBuf.get(tabId)?.trim()) return fail('saved_session_unavailable', '復元先の端末を安全に置き換えられません。')
     if (!switchController.restoreLineage(tabId, lineage)) return fail('saved_context_unavailable', '保存された引き継ぎコンテキストが破損しているため復元を中止しました。')
     const group = switchController.groups.get(tabId)!
-    const source = { ...verified, text: group.context.merge(verified).text }
+    const source = await enrichHandoffSource({ ...verified, text: group.context.merge(verified).text }, [], [...group.parked.values()])
+    if (!tabOrder.includes(tabId) || tabInfo.get(tabId) !== info || ptyProcesses.get(tabId) !== proc || isAgentTab(info) || group.pending || tabLastInputAt.has(tabId) || tabInputBuf.get(tabId)?.trim()) return fail('saved_session_unavailable', 'ノート確認中に端末が使われたため、復元を中止しました。')
     const token = randomUUID()
     const prompt = buildHandoffPrompt({ source, token }).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
     // The initial blank shell has not received user input. Replace it under the

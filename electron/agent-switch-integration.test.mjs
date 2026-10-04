@@ -19,6 +19,9 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
   const handlers = new Map(), events = new Map(), appEvents = new Map(), intervals = new Map(), sent = [], ptys = [], timeouts = new Set(), longTimeouts = []
   const sourceId = randomUUID()
   const sourcePath = path.join(testHome, '.claude/projects', project.replaceAll('/', '-'), sourceId + '.jsonl')
+  const notePath = path.join(testHome, 'Desktop/works/ObsidianVault/LLM_talk/source-note.md')
+  fs.mkdirSync(path.dirname(notePath), { recursive: true })
+  fs.writeFileSync(notePath, `---\nsession_id: ${sourceId}\n---\nSaved decision: preserve the agreed migration deadline.`)
   const restoreId = randomUUID()
   const restorePath = path.join(testHome, '.claude/projects', project.replaceAll('/', '-'), restoreId + '.jsonl')
   const cleanPrompt = data => data.replace(/\x1b\[20[01]~/g, '').replace(/\r$/, '')
@@ -48,7 +51,7 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
   }
   const fakePty = {
     spawn(shell, args, options) {
-      const proc = { process: options.env.AC_HANDOFF_PROMPT ? 'codex' : 'zsh', writes: [], killed: false,
+      const proc = { process: options.env.AC_HANDOFF_PROMPT ? 'codex' : 'zsh', writes: [], killed: false, launchPrompt: options.env.AC_HANDOFF_PROMPT,
         onData(fn) { this.data = fn }, onExit(fn) { this.exit = fn }, resize() {},
         kill() { this.killed = true; this.exit?.() },
         write(data) {
@@ -147,6 +150,8 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
     const switched = await invoke('terminal:switch-agent', root, 'codex')
     clearTimeout(watchdog)
     assert.equal(switched.ok, true, switched.error)
+    assert.match(ptys[1].launchPrompt, /Saved decision: preserve the agreed migration deadline/)
+    assert.ok(ptys[1].launchPrompt.includes(notePath))
     assert.equal((await invoke('terminal:agent-switch-state', root)).agent, 'codex')
     assert.equal((await invoke('terminal:list-info')).length, 1)
     assert.equal((await invoke('terminal:list-info'))[0].id, root)
@@ -179,6 +184,9 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
     const preview = await invoke('terminal:agent-switch-context', root)
     assert.match(preview.text, /Keep the approved scope/)
     assert.match(preview.text, /First phase done/)
+    assert.match(preview.text, /Saved decision: preserve the agreed migration deadline/)
+    assert.match(handoffWrite, /Saved decision: preserve the agreed migration deadline/)
+    assert.doesNotMatch(JSON.stringify(JSON.parse(fs.readFileSync(path.join(testHome, 'session.json'), 'utf8')).tabs[0].handoff.context), /Saved decision: preserve/)
     assert.doesNotMatch(preview.text, /AC_HANDOFF_READY|BEGIN.*HANDOFF/)
     assert.equal(preview.stats.turnCount, 2)
     assert.ok(preview.stats.omittedReceipts >= 4)

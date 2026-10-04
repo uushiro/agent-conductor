@@ -26,6 +26,7 @@ export interface AgentSwitchAdapter {
   read(id: string): Promise<SwitchSession>;
   token(): string;
   prompt(source: SwitchSession, token: string): string;
+  enrichSource?(source: SwitchSession, runtimes: string[], parked: Array<{ agent: SwitchAgent; sessionId: string; cwd: string }>): Promise<SwitchSession>;
   create(agent: SwitchAgent, cwd: string, prompt: string, token: string): string | Promise<string>;
   send(id: string, prompt: string): Promise<void>;
   activate(logicalId: string, runtimeId: string): void;

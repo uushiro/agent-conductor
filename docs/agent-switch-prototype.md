@@ -281,5 +281,27 @@ its actual UI button and switching tabs verified draft retention and focus retur
 a closed composer intentionally does not receive automatic focus.
 
 The final P1/P2 build has not received responsive 800/1200px, split-pane, attachment
-or real account-login-failure QA. Automated validation is 43 passing tests plus
+or real account-login-failure QA. Automated validation is 50 passing tests plus
 production build and Electron TypeScript checks (existing bundle-size warning).
+
+## Saved Obsidian session notes
+
+Preview, handoff and exact-session restart also discover saved Markdown under
+`~/Desktop/works/ObsidianVault/LLM_talk`. Association requires an exact session UUID
+in supported frontmatter or filename, an explicit vault Markdown path reported in
+conversation context, or a Claude Write/Edit destination in the source transcript.
+Titles and dates alone are never used. Both active and retained/parked sessions
+are considered; notes lacking a usable association are not guessed.
+
+At most three notes and 6,000 characters are appended as untrusted historical
+reference material with original paths. Newer conversation decisions take
+precedence. The notes are refreshed outside the canonical ledger, so a roundtrip
+does not repeatedly copy them into authored history. Missing notes leave ordinary
+handoff unchanged; inaccessible/limited discovery adds a visible notice without
+blocking the switch. Symlink paths escaping the vault are rejected.
+
+Synthetic filesystem and main-IPC tests cover association, delivery, exclusions,
+refresh and non-duplication. The actual vault could not be read from the development
+environment because of macOS access restrictions; real saved data and live CLI
+delivery of this addition have not been checked. The six-switch benchmark above
+predates the saved-note addition.

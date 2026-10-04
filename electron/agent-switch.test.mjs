@@ -250,3 +250,37 @@ test('parked descriptor survives timeout and cancel, while a ready recovery is r
   const pending = g.controller.switch('tab-1', 'codex'); await new Promise(resolve => setTimeout(resolve, 5)); g.controller.cancel('tab-1')
   assert.equal((await pending).errorCode, 'cancelled'); assert.equal(cancelRestores, 1); assert.ok(g.controller.groups.get('tab-1').parked.has('codex'))
 })
+
+
+test('supplementary notes appear in preview and each handoff without entering the canonical ledger', async () => {
+  const f = fixture(); let note = 'Obsidian note version 1'; const calls = []
+  f.adapter.enrichSource = async (source, runtimes, parked) => { calls.push({ runtimes, parked }); return { ...source, text: source.text + '\n' + note } }
+  assert.match((await f.controller.preview('tab-1')).text, /note version 1/)
+  assert.doesNotMatch(f.controller.group('tab-1').context.serialize().text, /Obsidian/)
+  assert.equal((await f.controller.switch('tab-1', 'codex')).ok, true)
+  note = 'Obsidian note version 2'
+  assert.equal((await f.controller.switch('tab-1', 'claude')).ok, true)
+  assert.match(f.prompts[1], /note version 2/)
+  assert.doesNotMatch(f.prompts[1], /note version 1/)
+  assert.deepEqual(calls.at(-1).runtimes, ['tab-1'])
+  assert.doesNotMatch(f.controller.group('tab-1').context.serialize().text, /Obsidian/)
+})
+
+test('unavailable supplementary notes do not prevent a normal handoff', async () => {
+  const f = fixture()
+  f.adapter.enrichSource = async () => { throw new Error('EPERM') }
+  assert.equal((await f.controller.switch('tab-1', 'codex')).ok, true)
+  assert.match(f.prompts[0], /Obsidian保存ノートを確認できません/)
+})
+
+
+test('cancel while saved notes load never launches a target', async () => {
+  const f = fixture(); let finish; let entered
+  const started = new Promise(resolve => { entered = resolve })
+  f.adapter.enrichSource = source => new Promise(resolve => { finish = () => resolve(source); entered() })
+  const switching = f.controller.switch('tab-1', 'codex')
+  await started; f.controller.cancel('tab-1'); finish()
+  assert.equal((await switching).errorCode, 'cancelled')
+  assert.equal(f.sessions.size, 1)
+  assert.equal(f.activations.length, 0)
+})

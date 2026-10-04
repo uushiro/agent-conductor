@@ -54,12 +54,19 @@ export class AgentSwitchController {
       history: group.history.map(({ agent, text }) => ({ agent, text })), progress, errorCode: group.errorCode,
       recovery: !group.pending && group.recovery ? { agent: group.recovery.agent, exited: group.recovery.exited } : null, lastAttempt: group.lastAttempt }
   }
+  async enrichedSource(group, source) {
+    if (!this.adapter.enrichSource) return source
+    try { return await this.adapter.enrichSource(source, [...group.members].filter(id => id !== group.active), [...group.parked.values()]) }
+    catch { return { ...source, text: source.text + '\n\n[Obsidian保存ノートを確認できませんでした。会話本文のみ引き継ぎます。]' } }
+  }
   async preview(id) {
     const group = this.group(id)
     let source
     try { source = await this.adapter.read(group.active) } catch { /* preserve prior preview */ }
     if (!source?.ready) return { ...group.context.serialize(), ready: false, reason: source?.reason || '会話の完了を確認してから内容を更新してください。' }
-    return { ...group.context.merge(source), ready: true, reason: '' }
+    const canonical = group.context.merge(source)
+    const enriched = await this.enrichedSource(group, { ...source, text: canonical.text })
+    return { ...canonical, text: enriched.text, ready: true, reason: '' }
   }
   async switch(id, target) {
     const group = this.group(id)
@@ -74,7 +81,7 @@ export class AgentSwitchController {
       if (!source?.ready || !source.agent || source.agent === target) throw this._error(source?.errorCode || 'source_unavailable', source?.reason || '切り替え元の会話は引き継げる状態ではありません。')
       if (pending.cancelled) throw this._error('cancelled', '切り替えを取り消しました。')
       this._cleanupRecovery(group, target)
-      source = { ...source, text: group.context.merge(source).text }
+      source = await this.enrichedSource(group, { ...source, text: group.context.merge(source).text })
       const prompt = this.adapter.prompt(source, pending.token); let existing = null
       const recovery = group.recovery
       if (recovery?.agent === target) {
