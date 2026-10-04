@@ -3,6 +3,9 @@ import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs'
 import https from 'node:https'
+import { randomUUID } from 'node:crypto'
+import { readHandoffSession, buildHandoffPrompt } from './agent-handoff.mjs'
+import { AgentSwitchController } from './agent-switch.mjs'
 import { execFile } from 'node:child_process'
 import { readClaudeSessionTitle } from './claude-session-title.mjs'
 
@@ -285,12 +288,12 @@ const AGENT_MSG_BUSY_MS = 3000
 // Resolve a destination tab by issue (tab name): exact match first, then prefix match.
 // Returns null when not found or ambiguous.
 function resolveTabByName(name: string, excludeTabId: string): string | null {
-  const candidates = tabOrder.filter((id) => id !== excludeTabId)
-  const exact = candidates.filter((id) => (tabInfo.get(id)?.issue || '') === name)
+  const candidates = tabOrder.filter((id) => id !== switchController.owner(excludeTabId))
+  const exact = candidates.filter((id) => (tabInfo.get(switchController.active(id))?.issue || '') === name)
   if (exact.length === 1) return exact[0]
   if (exact.length > 1) return null
   const prefix = candidates.filter((id) => {
-    const issue = tabInfo.get(id)?.issue || ''
+    const issue = tabInfo.get(switchController.active(id))?.issue || ''
     return issue !== '' && issue.startsWith(name)
   })
   if (prefix.length === 1) return prefix[0]
@@ -318,6 +321,7 @@ function deliverAgentMsg(msg: AgentMsg) {
   if (!proc) return
   const text = `[from: ${msg.fromName}] ${msg.body}`
   proc.write('\x1b[200~' + text + '\x1b[201~')
+  tabInputBuf.set(msg.toTabId, (tabInputBuf.get(msg.toTabId) || '') + text)
   mainWindow?.webContents.send('agent-msg:notify', {
     type: 'delivered', from: msg.fromName, dest: tabInfo.get(msg.toTabId)?.issue || msg.toTabId, body: msg.body,
   })
@@ -354,6 +358,7 @@ function parseUserSendCommand(line: string): { dest: string; body: string } | nu
 // PTY output stream, so it can't be re-detected by redraws — and a user re-typing the
 // same text clearly intends a re-send. Output-side detection always goes through dedup.
 function handleAgentSend(fromTabId: string, destName: string, body: string, opts?: { bypassDedup?: boolean }) {
+  if (switchController.blocked(fromTabId)) return
   const now = Date.now()
   if (!opts?.bypassDedup) {
     // Output-side detections come from PTY repaints where the TUI may have re-wrapped
@@ -382,7 +387,8 @@ function handleAgentSend(fromTabId: string, destName: string, body: string, opts
   }
 
   const fromName = tabInfo.get(fromTabId)?.issue || fromTabId
-  const toTabId = resolveTabByName(destName, fromTabId)
+  const logicalDest = resolveTabByName(destName, fromTabId)
+  const toTabId = logicalDest ? switchController.active(logicalDest) : null
   if (!toTabId) {
     console.log(`[agent-msg] 宛先が見つからない: "${destName}" (from: ${fromName})`)
     mainWindow?.webContents.send('agent-msg:notify', {
@@ -410,6 +416,7 @@ setInterval(() => {
   const deliveredTo = new Set<string>()
   for (let i = 0; i < agentMsgQueue.length; ) {
     const msg = agentMsgQueue[i]
+    if (switchController.blocked(msg.toTabId)) { i++; continue }
     if (!ptyProcesses.has(msg.toTabId)) {
       console.log(`[agent-msg] 宛先タブが閉じられたため破棄: ${msg.toTabId}`)
       agentMsgQueue.splice(i, 1)
@@ -728,7 +735,7 @@ function getRecentClaudeSessions(cwd: string): string[] {
 function saveSession() {
   const tabs: SavedTab[] = []
   for (const id of tabOrder) {
-    const info = tabInfo.get(id)
+    const info = tabInfo.get(switchController.active(id))
     if (info) {
       const hadClaude = info.hadClaude
       let claudeSessionId: string | null = null
@@ -1456,6 +1463,7 @@ function autoTitle(input: string): string {
 }
 
 function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
+  if (ptyProcesses.get(id) !== ptyProcess) return
   const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGemini: false, geminiSessionFile: null as string | null, hadCodex: false, codexSessionId: null as string | null, resuming: false, model: null as string | null, launchModel: null as string | null, activeAgents: [] as ActiveAgent[], pendingSessionTitle: null as string | null }
   const prevProc = info.proc
 
@@ -1502,14 +1510,16 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
   tabInfo.set(id, info)
 }
 
-function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty.spawn> } {
+function spawnPty(cwd?: string, handoff?: { agent: ResumableAgent; prompt: string; sessionId: string | null; token: string }): { id: string; ptyProcess: ReturnType<typeof pty.spawn> } {
   const id = `tab-${++tabCounter}`
   const shell = process.env.SHELL || (os.platform() === 'win32' ? 'powershell.exe' : 'zsh')
   const initialCwd = cwd || HOME
   // Spawn as a login shell (like Terminal.app) so ~/.zprofile / ~/.bash_profile
   // are sourced. Without this, PATH set only there (e.g. the codex installer's
   // ~/.local/bin entry) is missing and the CLI appears as "command not found".
-  const shellArgs = ['zsh', 'bash', 'fish', 'sh'].includes(path.basename(shell)) ? ['-l'] : []
+  const shellArgs = handoff
+    ? ['-lc', `ac_prompt="$AC_HANDOFF_PROMPT"; unset AC_HANDOFF_PROMPT; exec ${handoff.agent}${handoff.agent === 'claude' ? ` --session-id ${handoff.sessionId}` : ''} "$ac_prompt"`]
+    : ['zsh', 'bash', 'fish', 'sh'].includes(path.basename(shell)) ? ['-l'] : []
   const ptyProcess = pty.spawn(shell, shellArgs, {
     name: 'xterm-256color',
     cols: 80,
@@ -1521,18 +1531,31 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
       // Let agents inside the tab know they run under Agent Conductor
       // (enables [[SEND: <tab> :: <body>]] inter-tab messaging awareness)
       env.AGENT_CONDUCTOR = '1'
+      if (handoff) env.AC_HANDOFF_PROMPT = handoff.prompt
       return env
     })(),
   })
 
   ptyProcesses.set(id, ptyProcess)
   tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null, hadCodex: false, codexSessionId: null, resuming: false, model: null, launchModel: null, activeAgents: [], pendingSessionTitle: null })
-  tabOrder.push(id)
+  if (!handoff) tabOrder.push(id)
+  else {
+    const info = tabInfo.get(id)!
+    info.hadClaude = handoff.agent === 'claude'
+    info.hadCodex = handoff.agent === 'codex'
+    info.claudeSessionId = handoff.agent === 'claude' ? handoff.sessionId : null
+    info.proc = handoff.agent
+    handoffRuntimes.set(id, { agent: handoff.agent, token: handoff.token, startedAt: Date.now(), exited: false, output: '' })
+    // Startup transcript echo must never route SEND markers into another tab.
+    tabResumeCooldown.set(id, Number.POSITIVE_INFINITY)
+    ptyProcess.onExit(() => { const runtime = handoffRuntimes.get(id); if (runtime) runtime.exited = true })
+  }
 
   // Inject shell hook to emit OSC 7 on every prompt (cwd tracking without lsof).
   // OSC 7 format: \033]7;file://hostname/cwd\007
   // We wait a tick so the shell is ready to accept input.
-  setTimeout(() => {
+  if (!handoff) setTimeout(() => {
+    if (ptyProcesses.get(id) !== ptyProcess) return
     const shellName = path.basename(shell)
     const hostname = os.hostname()
     if (shellName === 'zsh') {
@@ -1549,6 +1572,7 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
   // Relay pty output → renderer, and buffer last output for sidebar
   // Also parse OSC 7 sequences to track cwd without lsof.
   ptyProcess.onData((data: string) => {
+    if (ptyProcesses.get(id) !== ptyProcess) return
     // OSC 7: \033]7;file://hostname/path\007  or  \033]7;file://hostname/path\033\\
     const osc7 = data.match(/\x1b\]7;file:\/\/[^\x07\x1b]*(?:\x07|\x1b\\)/)
     if (osc7) {
@@ -1604,7 +1628,11 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
       ? data.replace(/Stop hook error[^\n\r\x1b]*/g, (m) => `\x1b[90m${m}\x1b[39m`)
       : data
 
-    mainWindow?.webContents.send('terminal:data', id, dataForRenderer)
+    handoffScreens.set(id, ((handoffScreens.get(id) || '') + dataForRenderer).slice(-131072))
+    const runtime = handoffRuntimes.get(id)
+    if (runtime) runtime.output = (runtime.output + dataForRenderer).slice(-131072)
+    const owner = switchController.owner(id)
+    if (switchController.active(owner) === id) mainWindow?.webContents.send('terminal:data', owner, dataForRenderer)
     const prev = tabLastOutput.get(id) || ''
     const combined = (prev + data).slice(-3000)
     tabLastOutput.set(id, combined)
@@ -1709,6 +1737,100 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
   return { id, ptyProcess }
 }
 
+// The public tab ID stays stable. Parked runtimes are omitted from tabOrder and
+// cannot receive user input or queued agent messages until explicitly activated.
+const handoffRuntimes = new Map<string, { agent: ResumableAgent; token: string; startedAt: number; exited: boolean; output: string }>()
+const handoffScreens = new Map<string, string>()
+
+function releaseHandoffRuntime(id: string) {
+  for (const timers of [tabTimers, tabSessionWatchers, tabCodexSessionWatchers, tabGeminiSessionWatchers]) {
+    const timer = timers.get(id)
+    if (timer) clearInterval(timer)
+    timers.delete(id)
+  }
+  const resumeTimer = tabResumeWatch.get(id)
+  if (resumeTimer) clearTimeout(resumeTimer)
+  tabResumeWatch.delete(id)
+  const proc = ptyProcesses.get(id)
+  ptyProcesses.delete(id)
+  try { proc?.kill() } catch { /* already exited */ }
+  for (const map of [tabInfo, tabInputBuf, tabLastOutput, tabLastOutputAt, tabLastInputAt,
+    tabDetectScanBuf, tabModelScanBuf, tabSentAgentMsgKeys, tabAgentMarkerSeen,
+    tabAgentOscBuf, tabResumeCooldown, handoffRuntimes, handoffScreens]) map.delete(id)
+  for (let i = agentMsgQueue.length - 1; i >= 0; i--) {
+    if (agentMsgQueue[i].toTabId === id || agentMsgQueue[i].fromTabId === id) agentMsgQueue.splice(i, 1)
+  }
+}
+
+async function readRuntimeHandoff(id: string) {
+  const info = tabInfo.get(id)
+  const runtime = handoffRuntimes.get(id)
+  const agent = runtime?.agent ?? (info?.hadClaude ? 'claude' : info?.hadCodex ? 'codex' : null)
+  const unavailable = (reason: string) => ({ agent, ready: false, reason, cwd: info?.cwd || HOME, lastEventAt: 0, lastAssistantText: '', text: '' })
+  if (!info || !agent || !isAgentTab(info) || runtime?.exited) return unavailable('ClaudeまたはCodexの会話を開始してください。')
+  if (tabInputBuf.get(id)?.trim()) return unavailable('入力中の文章を送信、または消してから切り替えてください。')
+  if (info.activeAgents.some(a => a.status === 'started')) return unavailable('実行中のエージェントの完了を待っています。')
+  let sessionId = agent === 'claude' ? info.claudeSessionId || info.claudeResumeParentId : info.codexSessionId
+  // Codex does not expose a launch --session-id. Bind only a rollout containing
+  // our unpredictable handoff nonce, never the most recent file in a shared cwd.
+  if (!sessionId && runtime?.agent === 'codex') {
+    const dirs = new Set([codexDayDir(new Date(runtime.startedAt)), codexDayDir(new Date())])
+    const matches: string[] = []
+    for (const candidate of [...dirs].flatMap(listCodexRollouts).filter(e => e.mtime >= runtime.startedAt).slice(0, 50)) {
+      if (candidate.size > 8 * 1024 * 1024 || readCodexRolloutCwd(candidate.path) !== info.cwd) continue
+      const transcript = await readHandoffSession({ agent, sessionId: candidate.uuid, cwd: info.cwd, home: HOME })
+      if (transcript.text.includes(`AC_HANDOFF_READY:${runtime.token}`)) matches.push(candidate.uuid)
+    }
+    if (matches.length === 1) info.codexSessionId = sessionId = matches[0]
+  }
+  if (!sessionId) return unavailable('このタブの会話IDを確認しています。')
+  // Refuse duplicate ownership rather than risk handing another tab's work over.
+  for (const [otherId, other] of tabInfo) {
+    if (otherId !== id && (agent === 'claude' ? other.claudeSessionId === sessionId : other.codexSessionId === sessionId)) {
+      return unavailable('会話IDが別のタブと重複しています。切り替えを中止しました。')
+    }
+  }
+  const result = await readHandoffSession({ agent, sessionId, cwd: info.cwd, home: HOME })
+  const ready = result.ready && result.lastEventAt >= (tabLastInputAt.get(id) || 0)
+  return { ...result, cwd: info.cwd, ready, reason: ready ? '' : '会話の完了を確認できません。実行中、または未対応のログ形式です。' }
+}
+
+const switchController = new AgentSwitchController({
+  read: readRuntimeHandoff,
+  token: () => randomUUID(),
+  prompt: (source: any, token: string) => buildHandoffPrompt({ source, token })
+    // Control characters are never forwarded through a terminal paste.
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ''),
+  create: (agent: ResumableAgent, cwd: string, prompt: string, token: string) => {
+    // zsh/bash are the shell dialects supported by the quoted launch wrapper.
+    if (!['zsh', 'bash'].includes(path.basename(process.env.SHELL || 'zsh'))) throw new Error('試作版の切り替えはzsh/bashに対応しています。')
+    const { id } = spawnPty(cwd, { agent, prompt, token, sessionId: agent === 'claude' ? randomUUID() : null })
+    return id
+  },
+  send: async (id: string, prompt: string) => {
+    const check = await readRuntimeHandoff(id)
+    const proc = ptyProcesses.get(id)
+    if (!check.ready || !proc) throw new Error('復帰先の会話が入力待ちではありません。')
+    tabResumeCooldown.set(id, Number.POSITIVE_INFINITY)
+    // This is a user-requested context-receipt turn, not SEND message delivery.
+    // No timer guesses about CLI startup: only a verified completed turn reaches here.
+    proc.write('\x1b[200~' + prompt + '\x1b[201~\r')
+    tabLastInputAt.set(id, Date.now())
+  },
+  activate: (logicalId: string, runtimeId: string) => {
+    const original = tabInfo.get(logicalId)
+    const current = tabInfo.get(runtimeId)
+    if (original && current) current.issue = original.issue
+    for (const message of agentMsgQueue) {
+      if (switchController.owner(message.toTabId) === logicalId) message.toTabId = runtimeId
+    }
+    mainWindow?.webContents.send('terminal:reset', logicalId, handoffScreens.get(runtimeId) || '')
+    saveSession()
+  },
+  exited: (id: string) => !ptyProcesses.has(id) || handoffRuntimes.get(id)?.exited === true,
+  release: releaseHandoffRuntime,
+})
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -1730,6 +1852,15 @@ function createWindow() {
   // Register IPC handlers only once (guard against createWindow being called multiple times)
   if (!ipcHandlersRegistered) {
     ipcHandlersRegistered = true
+
+  ipcMain.handle('terminal:agent-switch-state', (_event, tabId: string) => switchController.state(tabId))
+  ipcMain.handle('terminal:switch-agent', async (_event, tabId: string, target: ResumableAgent) => {
+    if (!tabOrder.includes(tabId)) return { ok: false, error: 'タブが見つかりません。' }
+    try { return await switchController.switch(tabId, target) }
+    catch { return { ok: false, error: '引き継ぎ情報を読み取れませんでした。元の作業を維持しています。' } }
+  })
+  ipcMain.handle('terminal:cancel-agent-switch', (_event, tabId: string) => switchController.cancel(tabId))
+
 
   // Create a new terminal tab (optional cwd)
   // pendingSessionId pre-marks a Resume-created tab with its agent/session so
@@ -1753,6 +1884,7 @@ function createWindow() {
 
   // Get title for a tab (poll from renderer)
   ipcMain.handle('terminal:get-title', (_event, tabId: string) => {
+    tabId = switchController.active(tabId)
     const info = tabInfo.get(tabId)
     if (!info) return { issue: '', detail: 'Terminal', model: null, activeAgents: [], agentStatus: 'none' as TabAgentStatus, promptChoices: [] as PromptChoice[] }
     const agentStatus = computeTabAgentStatus(tabId) // also prunes expired done entries
@@ -1784,6 +1916,9 @@ function createWindow() {
 
   // Set issue from renderer (manual rename)
   ipcMain.handle('terminal:set-issue', (_event, tabId: string, issue: string, persistSessionTitle = false) => {
+    const group = switchController.groups.get(tabId)
+    if (group) for (const member of group.members) { const memberInfo = tabInfo.get(member); if (memberInfo) memberInfo.issue = issue }
+    tabId = switchController.active(tabId)
     const info = tabInfo.get(tabId)
     if (info) {
       info.issue = issue
@@ -1804,7 +1939,8 @@ function createWindow() {
   ipcMain.handle('terminal:list-info', () => {
     const now = Date.now()
     return [...tabOrder]
-      .map((id) => {
+      .map((logicalId) => {
+        const id = switchController.active(logicalId)
         const info = tabInfo.get(id)
         const lastOutputAt = tabLastOutputAt.get(id) ?? 0
         const lastInputAt = tabLastInputAt.get(id) ?? 0
@@ -1848,7 +1984,7 @@ function createWindow() {
 
         if (!info) return { id, cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null, lastOutput: '', active, lastInputAt, isThinking: false, isResuming: false, model: null, activeAgents: [], agentStatus: 'none' as TabAgentStatus, promptChoices: [] as PromptChoice[] }
         return {
-          id,
+          id: logicalId,
           cwd: info.cwd,
           proc: info.proc,
           issue: info.issue,
@@ -1870,6 +2006,7 @@ function createWindow() {
 
   // Load saved session — clears all existing PTY state first to prevent tab accumulation on HMR reloads
   ipcMain.handle('session:load', () => {
+    switchController.clear()
     // Kill and clear all existing terminals before restoring
     for (const timer of tabTimers.values()) clearInterval(timer)
     tabTimers.clear()
@@ -1897,7 +2034,7 @@ function createWindow() {
     for (const w of tabCodexSessionWatchers.values()) clearInterval(w)
     tabCodexSessionWatchers.clear()
     tabOrder.length = 0
-    tabCounter = 0
+    // Keep runtime IDs monotonic: cancelled async handoffs may still unwind.
     closedTabsHistory.length = 0
 
     return loadSession()
@@ -1906,7 +2043,7 @@ function createWindow() {
   // Close a terminal tab
   ipcMain.on('terminal:close', (_event: Electron.IpcMainEvent, tabId: string) => {
     // Save to closed history if had an agent session
-    const closingInfo = tabInfo.get(tabId)
+    const closingInfo = tabInfo.get(switchController.active(tabId))
     if (closingInfo?.hadClaude) {
       const sessionId = closingInfo.claudeSessionId || closingInfo.claudeResumeParentId
       if (sessionId && sessionHasConversation(sessionId, closingInfo.cwd || HOME)) {
@@ -1941,6 +2078,7 @@ function createWindow() {
       if (closedTabsHistory.length > 10) closedTabsHistory.pop()
     }
 
+    switchController.close(tabId)
     const timer = tabTimers.get(tabId)
     if (timer) { clearInterval(timer); tabTimers.delete(tabId) }
     tabInfo.delete(tabId)
@@ -1976,6 +2114,7 @@ function createWindow() {
 
   // Whether a tab has an active claude session (used for close confirmation)
   ipcMain.handle('terminal:get-tab-has-claude', (_event, tabId: string) => {
+    tabId = switchController.active(tabId)
     const info = tabInfo.get(tabId)
     return !!(info?.hadClaude || info?.hadGemini || info?.hadCodex)
   })
@@ -1993,6 +2132,8 @@ function createWindow() {
 
   // Relay renderer input → pty, and capture prompts / detect claude launch
   ipcMain.on('terminal:input', (_event: Electron.IpcMainEvent, tabId: string, data: string) => {
+    tabId = switchController.active(tabId)
+    if (switchController.blocked(tabId)) return
     const proc = ptyProcesses.get(tabId)
 
     // Strip bracketed-paste markers for parsing only (PTY still receives raw data).
@@ -2132,6 +2273,8 @@ function createWindow() {
   // record when it was sent, so stale (already-answered) prompt chips are suppressed
   // until new output arrives (see isPromptChoicesStale)
   ipcMain.handle('terminal:send-choice', (_event, tabId: string, num: string) => {
+    tabId = switchController.active(tabId)
+    if (switchController.blocked(tabId)) return
     const proc = ptyProcesses.get(tabId)
     if (!proc) return
     proc.write(num + '\r')
@@ -2144,6 +2287,7 @@ function createWindow() {
 
   // Handle resize (with tabId)
   ipcMain.on('terminal:resize', (_event: Electron.IpcMainEvent, tabId: string, cols: number, rows: number) => {
+    tabId = switchController.active(tabId)
     const proc = ptyProcesses.get(tabId)
     if (proc) {
       try {
@@ -2173,6 +2317,7 @@ function createWindow() {
   // Returns a structured result ({ ok, ... }) instead of rejecting so the renderer
   // gets clean error messages (ipcMain.handle rejections are wrapped by Electron).
   ipcMain.handle('terminal:create-worktree', async (_event, tabId: string, branchName?: string) => {
+    tabId = switchController.active(tabId)
     const cwd = tabInfo.get(tabId)?.cwd || HOME
     const git = (args: string[], opts: { cwd: string; timeout: number }) =>
       new Promise<string>((resolve, reject) => {
@@ -2431,6 +2576,7 @@ function createWindow() {
   mainWindow.on('closed', () => {
     // Save session before cleanup
     saveSession()
+    switchController.clear()
 
     for (const timer of tabTimers.values()) clearInterval(timer)
     tabTimers.clear()

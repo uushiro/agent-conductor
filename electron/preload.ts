@@ -1,6 +1,16 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  // Same-visible-tab Agent Conductor handoff
+  getAgentSwitchState: (tabId: string) => ipcRenderer.invoke('terminal:agent-switch-state', tabId),
+  switchAgent: (tabId: string, target: 'claude' | 'codex') =>
+    ipcRenderer.invoke('terminal:switch-agent', tabId, target) as Promise<{ ok: boolean; error?: string }>,
+  cancelAgentSwitch: (tabId: string) => ipcRenderer.invoke('terminal:cancel-agent-switch', tabId) as Promise<void>,
+  onTerminalReset: (callback: (tabId: string, data: string) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, tabId: string, data: string) => callback(tabId, data)
+    ipcRenderer.on('terminal:reset', listener)
+    return () => ipcRenderer.removeListener('terminal:reset', listener)
+  },
   // Terminal lifecycle
   createTerminal: (cwd?: string, pendingSessionId?: string, pendingAgent?: 'claude' | 'codex') =>
     ipcRenderer.invoke('terminal:create', cwd, pendingSessionId, pendingAgent) as Promise<string>,

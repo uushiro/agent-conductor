@@ -60,6 +60,17 @@ export interface SavedSession {
 }
 
 export interface ElectronAPI {
+  getAgentSwitchState: (tabId: string) => Promise<{
+    agent: 'claude' | 'codex' | null
+    phase: 'idle' | 'preparing' | 'error'
+    canSwitch: boolean
+    reason: string
+    target: 'claude' | 'codex' | null
+    history: Array<{ agent: 'claude' | 'codex'; text: string }>
+  }>
+  switchAgent: (tabId: string, target: 'claude' | 'codex') => Promise<{ ok: boolean; error?: string }>
+  cancelAgentSwitch: (tabId: string) => Promise<void>
+  onTerminalReset: (callback: (tabId: string, data: string) => void) => () => void
   createTerminal: (cwd?: string, pendingSessionId?: string, pendingAgent?: 'claude' | 'codex') => Promise<string>
   createWorktreeTerminal: (tabId: string, branchName?: string) => Promise<
     { ok: true; tabId: string; worktreePath: string; branch: string } | { ok: false; error: string }

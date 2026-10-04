@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle, type CSSProperties } from 'react'
 import { Terminal } from './Terminal'
+import { AgentSwitch } from './AgentSwitch'
 import { useSettings } from '../contexts/SettingsContext'
 import { useLang, strings } from '../contexts/LangContext'
 
@@ -101,6 +102,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
   const { lang } = useLang()
   const t = strings[lang]
   const [tabs, setTabs] = useState<Tab[]>([])
+  const [preparingTabIds, setPreparingTabIds] = useState<Set<string>>(() => new Set())
   const [editingTabId, setEditingTabId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [confirmClose, setConfirmClose] = useState<{ tabId: string; issue: string } | null>(null)
@@ -136,6 +138,15 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
   const agentMenuRef = useRef<HTMLDivElement>(null)
   const initialized = useRef(false)
   const tabsRef = useRef<Tab[]>([])
+
+  const handlePreparingChange = useCallback((tabId: string, preparing: boolean) => {
+    setPreparingTabIds((current) => {
+      const next = new Set(current)
+      if (preparing) next.add(tabId)
+      else next.delete(tabId)
+      return next
+    })
+  }, [])
 
   // Restore session or create first tab on mount
   useEffect(() => {
@@ -1025,6 +1036,9 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
           </button>
         </div>
       )}
+      {activeTabId && tabs.some((tab) => tab.id === activeTabId) && (
+        <AgentSwitch tabId={activeTabId} onPreparingChange={handlePreparingChange} />
+      )}
       <div className="terminal-tabs-content" ref={contentRef}>
         {tabs.map((tab) => {
           const splitActive = panes[1] !== null
@@ -1044,6 +1058,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
               focused={splitActive && pane === focusedPane}
               paneStyle={paneStyle}
               fontSize={fontSize}
+              inputDisabled={preparingTabIds.has(tab.id)}
               onFocusRequest={splitActive && pane !== focusedPane ? () => onActiveTabChange(tab.id) : undefined}
             />
           )
