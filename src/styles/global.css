@@ -987,7 +987,7 @@ html, body, #root {
 
 /* Split view: focused pane indicator */
 .terminal-container--focused {
-  box-shadow: inset 0 0 0 1px var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 /* Split view: draggable divider between panes */

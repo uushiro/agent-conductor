@@ -1066,6 +1066,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
               tabId={tab.id}
               visible={pane !== null}
               focused={pane !== null && (!splitActive || pane === focusedPane)}
+              showFocusIndicator={splitActive}
               paneStyle={paneStyle}
               fontSize={fontSize}
               inputDisabled={preparingTabIds.has(tab.id)}

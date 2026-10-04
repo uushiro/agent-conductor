@@ -7,8 +7,10 @@ interface TerminalProps {
   tabId: string
   /** Shown in any pane (single view: the active tab) */
   visible: boolean
-  /** This pane is the focused one (only meaningful in split view) */
+  /** This pane owns terminal input and handoff render acknowledgements. */
   focused: boolean
+  /** Show a subtle indicator only when choosing between split panes. */
+  showFocusIndicator?: boolean
   fontSize: number
   /** Pane geometry override (split view): e.g. { right: '50%' } / { left: '50%' } */
   paneStyle?: CSSProperties
@@ -33,7 +35,7 @@ function stripTrailingSelectionNewline(text: string): string {
   return text.replace(/\r?\n$/, '')
 }
 
-export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocusRequest, inputDisabled = false }: TerminalProps) {
+export function Terminal({ tabId, visible, focused, showFocusIndicator = false, fontSize, paneStyle, onFocusRequest, inputDisabled = false }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<XTerm | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
@@ -274,7 +276,7 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
     <div
       ref={containerRef}
       data-tab-id={tabId}
-      className={`terminal-container${focused ? ' terminal-container--focused' : ''}`}
+      className={`terminal-container${focused && showFocusIndicator ? ' terminal-container--focused' : ''}`}
       aria-busy={inputDisabled || undefined}
       style={{ display: visible ? undefined : 'none', userSelect: 'none', WebkitUserSelect: 'none', ...paneStyle }}
       onMouseDown={onFocusRequest}
