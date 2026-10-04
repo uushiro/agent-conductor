@@ -55,7 +55,7 @@ export interface TabInfo {
 }
 
 export interface SavedSession {
-  tabs: Array<{ handoff?: unknown; issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null; hadGemini: boolean; hadCodex: boolean; codexSessionId: string | null; model: string | null }>
+  tabs: Array<{ handoff?: unknown; issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null; hadGemini: boolean; geminiSessionFile?: string | null; hadCodex: boolean; codexSessionId: string | null; model: string | null }>
   activeIndex: number
 }
 
@@ -91,7 +91,7 @@ export interface ElectronAPI {
   getAgentSwitchContext: (tabId: string) => Promise<{ text: string; stats: { turnCount: number; omittedReceipts: number; truncated: boolean; droppedTurns: number; retainedUnknown: number }; ready: boolean; reason: string }>
   acknowledgeAgentSwitchRender: (tabId: string, renderToken: string) => void
   onTerminalReset: (callback: (tabId: string, data: string, renderToken?: string) => void) => () => void
-  createTerminal: (cwd?: string, pendingSessionId?: string, pendingAgent?: 'claude' | 'codex') => Promise<string>
+  createTerminal: (cwd?: string, pendingSessionId?: string, pendingAgent?: 'claude' | 'codex' | 'gemini', restoreIndex?: number) => Promise<string>
   createWorktreeTerminal: (tabId: string, branchName?: string) => Promise<
     { ok: true; tabId: string; worktreePath: string; branch: string } | { ok: false; error: string }
   >
@@ -108,6 +108,9 @@ export interface ElectronAPI {
   getClosedHistory: () => Promise<ClosedTabEntry[]>
   removeClosedHistory: (sessionId: string) => void
   loadSession: () => Promise<SavedSession | null>
+  restoreSavedSession: (tabId: string, retry?: boolean) => Promise<{ ok: boolean; reason?: string }>
+  setActiveSessionTab: (tabId: string) => void
+  finishSessionRestore: () => void
   onAgentMsgNotify: (cb: (payload: { type: 'queued' | 'delivered' | 'error'; from: string; dest: string; body: string }) => void) => () => void
   onQuitConfirm: (cb: () => void) => () => void
   onQuitConfirmCancel: (cb: () => void) => () => void

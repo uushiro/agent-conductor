@@ -882,7 +882,6 @@ html, body, #root {
 .agent-switch-history-toggle:hover { border-color: var(--accent); }
 .agent-switch-submit:disabled,
 .agent-switch-target select:disabled { opacity: .5; cursor: not-allowed; }
-.agent-switch-experimental { color: var(--accent-yellow); font-size: 10px; }
 .agent-switch-history-toggle { margin-left: auto; color: var(--text-secondary); }
 .agent-switch-status { min-height: 0; color: var(--text-secondary); margin-top: 3px; }
 .agent-switch-error { color: var(--accent-red); }

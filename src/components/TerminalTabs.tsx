@@ -164,34 +164,30 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     const session = await window.electronAPI.loadSession()
     if (session && session.tabs.length > 0) {
       const restored: Tab[] = []
-      const claudeResumes: Array<{ tabId: string; sessionId: string | null; model: string | null }> = []
-      const geminiResumes: Array<{ tabId: string }> = []
-      const codexResumes: Array<{ tabId: string; sessionId: string | null }> = []
+      const savedRestores: string[] = []
       const handoffRestores: Array<{ tabId: string; lineage: unknown }> = []
-      for (const saved of session.tabs) {
+      for (const [restoreIndex, saved] of session.tabs.entries()) {
         const handoff = (saved as any).handoff
         const pendingSessionId = saved.hadClaude
           ? saved.claudeSessionId ?? undefined
           : saved.hadCodex
           ? saved.codexSessionId ?? undefined
+          : saved.hadGemini
+          ? saved.geminiSessionFile ?? undefined
           : undefined
+        const pendingAgent = saved.hadCodex ? 'codex' : saved.hadGemini ? 'gemini' : saved.hadClaude ? 'claude' : undefined
         const tabId = await window.electronAPI.createTerminal(
           saved.cwd,
           pendingSessionId,
-          saved.hadCodex ? 'codex' : 'claude'
+          pendingAgent,
+          restoreIndex
         )
         if (saved.issue) {
           await window.electronAPI.setTerminalIssue(tabId, saved.issue)
         }
         if (handoff) {
           handoffRestores.push({ tabId, lineage: handoff })
-        } else if (saved.hadClaude) {
-          claudeResumes.push({ tabId, sessionId: saved.claudeSessionId, model: saved.model ?? null })
-        } else if (saved.hadGemini) {
-          geminiResumes.push({ tabId })
-        } else if (saved.hadCodex) {
-          codexResumes.push({ tabId, sessionId: saved.codexSessionId ?? null })
-        }
+        } else if (saved.hadClaude || saved.hadGemini || saved.hadCodex) savedRestores.push(tabId)
         const willResume = saved.hadClaude || saved.hadGemini || saved.hadCodex
         restored.push({
           id: tabId,
@@ -208,44 +204,24 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       setTabs(restored)
       const activeIdx = Math.min(session.activeIndex, restored.length - 1)
       onActiveTabChange(restored[activeIdx]?.id || restored[0]?.id || '')
+      window.electronAPI.finishSessionRestore()
 
       // Linked handoff sessions are validated and resumed only by main. Unlike
       // legacy tabs they never fall back to a latest session in the renderer.
       handoffRestores.forEach(({ tabId, lineage }, i) => setTimeout(() => {
         window.electronAPI.restoreHandoffSession(tabId, lineage)
       }, 500 + i * 1000))
-
-      // Auto-resume Claude tabs (3000ms stagger to prevent cross-tab session mixing)
-      // `model` here is saved.model = main's tabInfo.launchModel (explicit user choice only,
-      // never the banner-detected display model), so no flag → CLI/settings.json default.
-      claudeResumes.forEach(({ tabId, sessionId, model }, i) => {
-        setTimeout(() => {
-          const modelFlag = model ? ` --model ${model}` : ''
-          const cmd = sessionId ? `claude${modelFlag} --resume ${sessionId}\r` : `claude${modelFlag}\r`
-          window.electronAPI.sendTerminalInput(tabId, cmd)
-        }, 1000 + i * 3000)
-      })
-
-      // Auto-resume Gemini tabs (after all Claude resumes)
-      const claudeOffset = 1000 + claudeResumes.length * 3000
-      geminiResumes.forEach(({ tabId }, i) => {
-        setTimeout(() => {
-          window.electronAPI.sendTerminalInput(tabId, 'gemini --resume latest\r')
-        }, claudeOffset + i * 2000)
-      })
-
-      // Auto-resume Codex tabs (after all Gemini resumes).
-      // With a saved session UUID → "codex resume <uuid>"; otherwise a fresh "codex".
-      const geminiOffset = claudeOffset + geminiResumes.length * 2000
-      codexResumes.forEach(({ tabId, sessionId }, i) => {
-        setTimeout(() => {
-          window.electronAPI.sendTerminalInput(tabId, codexResumeCmd(sessionId))
-        }, geminiOffset + i * 2000)
-      })
+      // Main waits for each shell's explicit OSC 7 ready signal, validates the
+      // exact saved identity, then launches. Missing IDs stay visible as errors.
+      for (const tabId of savedRestores) void window.electronAPI.restoreSavedSession(tabId)
     } else {
       createTab()
     }
   }
+
+  useEffect(() => {
+    if (activeTabId) window.electronAPI.setActiveSessionTab(activeTabId)
+  }, [activeTabId])
 
   // Keep tabsRef in sync so polling can read current tabs without setTabs-for-reading
   useEffect(() => {
@@ -862,6 +838,22 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
           </span>
         )
       })()}
+      {editingTabId !== tab.id && tab.detail.startsWith('復元できません:') && (
+        <button
+          className="tab-choice-chip"
+          title="保存された会話を再試行"
+          onClick={(e) => {
+            e.stopPropagation()
+            setTabs((current) => current.map((item) => item.id === tab.id ? { ...item, detail: 'Resuming...', resuming: true } : item))
+            void window.electronAPI.restoreSavedSession(tab.id, true).then((result) => {
+              if (!result.ok) setTabs((current) => current.map((item) => item.id === tab.id ? { ...item, detail: `復元できません: ${result.reason || '再試行に失敗しました。'}`, resuming: false } : item))
+            })
+          }}
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          ↻
+        </button>
+      )}
       {tabs.length > 1 && editingTabId !== tab.id && (
         <button
           className="tab-close"

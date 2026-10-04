@@ -10,6 +10,7 @@ import { HandoffDrafts } from './handoff-draft.mjs'
 import { findSessionNotes } from './handoff-notes.mjs'
 import { execFile } from 'node:child_process'
 import { readClaudeSessionTitle } from './claude-session-title.mjs'
+import { SESSION_SCHEMA_VERSION, consumeOsc7, exactClaudeSessionId, exactCodexSessionId, mergeRestoreSnapshot, savedResumeCommand, selectedIndex } from './session-resume.mjs'
 
 // node-pty is a native module — require it
 const pty = require('node-pty')
@@ -132,6 +133,16 @@ const AGENT_OSC_RE = /\x1b\]777;notify;AGENT;([^\x07\x1b]*)(?:\x07|\x1b\\)/g
 const AGENT_MARKER_RE = /\[\[AGENT:\s*([^\]:]+?)\s*::\s*([^\]:]+?)\s*::\s*(started|done)\s*\]\]/g
 // tabId → timeout handle while watching for --resume failure ("No conversation found")
 const tabResumeWatch = new Map<string, ReturnType<typeof setTimeout>>()
+const tabResumeErrors = new Map<string, string>()
+const tabShellReady = new Set<string>()
+const tabShellReadyWaiters = new Map<string, Set<(ready: boolean) => void>>()
+const tabOsc7Buf = new Map<string, string>()
+const tabRestoreIndexes = new Map<string, number>()
+const tabSavedResumeDescriptors = new Map<string, SavedTab>()
+let loadedSessionSnapshot: SavedSession | null = null
+let restoreCreationComplete = true
+let activeLogicalTabId: string | null = null
+let sessionStateDisposed = false
 
 // --- In-tab worker agents ([[AGENT: label :: model :: started|done]]) ---
 // Dedup: physical re-emissions of the same marker (TUI repaints, chunk overlap re-scans)
@@ -684,6 +695,7 @@ interface SavedTab {
   hadClaude: boolean
   claudeSessionId: string | null
   hadGemini: boolean
+  geminiSessionFile?: string | null
   hadCodex: boolean
   codexSessionId: string | null
   // Launch-flag model only (tabInfo.launchModel) — restored as `claude --model X`.
@@ -699,8 +711,6 @@ interface SavedTab {
 
 // schemaVersion 2 (v2.14.4): `model` is the explicit launch flag, not the banner-detected
 // display model. Files without schemaVersion are v1 and their `model` is untrusted.
-const SESSION_SCHEMA_VERSION = 3
-
 interface SavedSession {
   schemaVersion?: number
   tabs: SavedTab[]
@@ -742,61 +752,36 @@ function getRecentClaudeSessions(cwd: string): string[] {
 }
 
 function saveSession() {
+  if (sessionStateDisposed) return
   const tabs: SavedTab[] = []
+  const liveByRestoreIndex = new Map<number, SavedTab>()
+  const extraTabs: SavedTab[] = []
   for (const id of tabOrder) {
     const info = tabInfo.get(switchController.active(id))
     if (info) {
+      const savedDescriptor = tabSavedResumeDescriptors.get(id)
+      const preserveFailedRestore = !!savedDescriptor && (info.resuming || tabResumeErrors.has(id))
       const group = switchController.groups.get(id)
       const committedRecovery = group?.recovery as { created?: boolean; runtime?: string } | null | undefined
       const committedMembers = group ? [...group.members].filter(runtime => !(committedRecovery?.created && committedRecovery.runtime === runtime)) : []
       const linked = !!group && !group.pending && (committedMembers.length > 1 || group.parked?.size > 0)
       const exactLineage = linked || !!(group as any)?.committedLineage
-      const hadClaude = info.hadClaude
-      let claudeSessionId: string | null = null
-
-      if (hadClaude) {
-        if (info.claudeResumeParentId) {
-          // This session was started via --resume. The parent ID is the safe, resumable
-          // checkpoint. Continuation files created by claude --resume are not themselves
-          // directly resumable (claude returns "No conversation found").
-          if (sessionHasConversation(info.claudeResumeParentId, info.cwd || HOME)) {
-            claudeSessionId = info.claudeResumeParentId
-          } else if (info.claudeSessionId && sessionHasConversation(info.claudeSessionId, info.cwd || HOME)) {
-            // Parent missing/empty (edge case) → fall back to continuation
-            claudeSessionId = info.claudeSessionId
-          }
-        } else {
-          // Fresh session (not started via --resume): save the watcher-detected ID
-          if (info.claudeSessionId && sessionHasConversation(info.claudeSessionId, info.cwd || HOME)) {
-            claudeSessionId = info.claudeSessionId
-          }
-        }
-        // Fallback: if no valid session was found, pick the most recent session
-        // with conversation content for this cwd (handles /resume inside Claude
-        // and cross-tab watcher contamination).
-        if (!claudeSessionId && !exactLineage) {
-          const recentSessions = getRecentClaudeSessions(info.cwd || HOME)
-          for (const sid of recentSessions.slice(0, 10)) {
-            if (sessionHasConversation(sid, info.cwd || HOME)) {
-              claudeSessionId = sid
-              break
-            }
-          }
-        }
-      }
+      const hadClaude = preserveFailedRestore ? savedDescriptor!.hadClaude : info.hadClaude
+      // Persist only an identity observed for this tab. Never substitute a
+      // different same-cwd conversation when the exact ID is absent.
+      const claudeSessionId = hadClaude ? exactClaudeSessionId(preserveFailedRestore ? { claudeSessionId: savedDescriptor!.claudeSessionId } : info) : null
 
       tabs.push({
         issue: info.issue,
-        cwd: info.cwd || HOME,
+        cwd: preserveFailedRestore ? savedDescriptor!.cwd : info.cwd || HOME,
         hadClaude,
         claudeSessionId,
-        hadGemini: info.hadGemini,
-        hadCodex: info.hadCodex,
-        codexSessionId: info.hadCodex
-          ? (isCodexUuid(info.codexSessionId) ? info.codexSessionId : exactLineage ? null : getLastCodexSessionId(info.cwd || HOME))
-          : null,
+        hadGemini: preserveFailedRestore ? savedDescriptor!.hadGemini : info.hadGemini,
+        geminiSessionFile: preserveFailedRestore ? savedDescriptor!.geminiSessionFile ?? null : info.hadGemini ? info.geminiSessionFile : null,
+        hadCodex: preserveFailedRestore ? savedDescriptor!.hadCodex : info.hadCodex,
+        codexSessionId: (preserveFailedRestore ? savedDescriptor!.hadCodex : info.hadCodex) ? exactCodexSessionId(preserveFailedRestore ? savedDescriptor : info) : null,
         // Persist the launch flag, not the display model (see tabInfo.launchModel).
-        model: info.launchModel,
+        model: preserveFailedRestore ? savedDescriptor!.model : info.launchModel,
         handoff: linked && ((info.hadClaude ? info.claudeSessionId || info.claudeResumeParentId : info.codexSessionId)) ? {
           active: { agent: info.hadClaude ? 'claude' : 'codex', sessionId: (info.hadClaude ? info.claudeSessionId || info.claudeResumeParentId : info.codexSessionId)!, cwd: info.cwd || HOME, claudeResumeParentId: info.claudeResumeParentId },
           parked: [
@@ -814,11 +799,23 @@ function saveSession() {
       const savedTab = tabs[tabs.length - 1]
       if ((group?.pending || group?.recovery || group?.errorCode?.startsWith('saved_') || !linked) && (group as any)?.committedLineage) savedTab.handoff = (group as any).committedLineage
       else if (savedTab.handoff) (group as any).committedLineage = savedTab.handoff
+      const restoreIndex = tabRestoreIndexes.get(id)
+      if (restoreIndex === undefined) extraTabs.push(savedTab)
+      else liveByRestoreIndex.set(restoreIndex, savedTab)
     }
   }
-  const session: SavedSession = { schemaVersion: SESSION_SCHEMA_VERSION, tabs: tabs.slice(0, 15), activeIndex: 0 }
+  const merged = mergeRestoreSnapshot(loadedSessionSnapshot, liveByRestoreIndex, restoreCreationComplete)
+  const persistedTabs = merged ? [...merged.tabs, ...extraTabs] : tabs
+  let activeIndex = selectedIndex(tabOrder, activeLogicalTabId)
+  if (merged && activeLogicalTabId) {
+    const restoredIndex = tabRestoreIndexes.get(activeLogicalTabId)
+    activeIndex = restoredIndex ?? merged.activeIndex
+  } else if (merged) activeIndex = merged.activeIndex
+  const session: SavedSession = { schemaVersion: SESSION_SCHEMA_VERSION, tabs: persistedTabs, activeIndex: Math.max(0, Math.min(activeIndex, persistedTabs.length - 1)) }
   try {
-    fs.writeFileSync(SESSION_FILE, JSON.stringify(session), 'utf-8')
+    fs.mkdirSync(path.dirname(SESSION_FILE), { recursive: true })
+    fs.writeFileSync(`${SESSION_FILE}.tmp`, JSON.stringify(session), 'utf-8')
+    fs.renameSync(`${SESSION_FILE}.tmp`, SESSION_FILE)
   } catch { /* ignore */ }
 }
 
@@ -895,7 +892,7 @@ function startSessionWatch(tabId: string, cwd: string) {
         .filter((entry): entry is { file: string; mtime: number } => entry !== null && entry.mtime >= startTime)
         .sort((a, b) => a.mtime - b.mtime)
 
-      if (newFiles.length > 0) {
+      if (newFiles.length === 1) {
         const sessionId = newFiles[0].file.replace('.jsonl', '')
         const info = tabInfo.get(tabId)
         if (info) {
@@ -911,6 +908,8 @@ function startSessionWatch(tabId: string, cwd: string) {
         }
         clearInterval(watcher)
         tabSessionWatchers.delete(tabId)
+      } else if (newFiles.length > 1) {
+        console.warn(`[claude-session] refused ambiguous same-cwd candidates for ${tabId} (${cwd})`)
       }
     } catch { /* ignore */ }
   }, 1000)
@@ -982,12 +981,14 @@ function startGeminiSessionWatch(tabId: string, cwd: string) {
         })
         .filter((e): e is { file: string; mtime: number } => e !== null && e.mtime >= startTime - 500)
         .sort((a, b) => a.mtime - b.mtime)
-      if (newFiles.length > 0) {
+      if (newFiles.length === 1) {
         const sessionFile = path.join(sessionDir, newFiles[0].file)
         const info = tabInfo.get(tabId)
         if (info) { info.geminiSessionFile = sessionFile; tabInfo.set(tabId, info) }
         clearInterval(watcher)
         tabGeminiSessionWatchers.delete(tabId)
+      } else if (newFiles.length > 1) {
+        console.warn(`[gemini-session] refused ambiguous same-cwd candidates for ${tabId} (${cwd})`)
       }
     } catch { /* ignore */ }
   }, 1000)
@@ -1333,11 +1334,19 @@ function startCodexSessionWatch(tabId: string, cwd: string) {
         .flatMap(listCodexRollouts)
         .filter((e) => !knownFiles.has(e.path) && e.mtime >= startTime - 500)
         .sort((a, b) => a.mtime - b.mtime)
+      const matches: Array<{ path: string; uuid: string; mtime: number }> = []
       for (const e of newFiles) {
         if (!isCodexUuid(e.uuid)) { knownFiles.add(e.path); continue }
         const fileCwd = readCodexRolloutCwd(e.path)
         if (fileCwd === null) continue // first line may not be flushed yet — retry next tick
         if (fileCwd !== cwd) { knownFiles.add(e.path); continue } // another project's session
+        matches.push(e)
+      }
+      if (matches.length > 1) {
+        console.warn(`[codex-session] refused ambiguous same-cwd candidates for ${tabId} (${cwd})`)
+        return
+      }
+      for (const e of matches) {
         const info = tabInfo.get(tabId)
         if (info) {
           const previousSessionId = info.codexSessionId
@@ -1371,7 +1380,7 @@ function sessionHasConversation(sessionId: string, cwd: string): boolean {
   const filePath = path.join(HOME, '.claude', 'projects', encoded, `${sessionId}.jsonl`)
   try {
     const content = fs.readFileSync(filePath, 'utf-8')
-    return /"type":"(user|assistant)"/.test(content)
+    return /"type"\s*:\s*"(user|assistant)"/.test(content)
   } catch { return false }
 }
 
@@ -1513,7 +1522,14 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
       info.resuming = false
     } else if (prevProc !== '' && !SHELLS.has(prevProc) && SHELLS.has(info.proc)) {
       // Agent → shell: clear agent state
-      if (prevProc === 'claude') {
+      const startupWatch = tabResumeWatch.get(id)
+      if (tabSavedResumeDescriptors.has(id) && startupWatch) {
+        clearTimeout(startupWatch)
+        tabResumeWatch.delete(id)
+        setResumeError(id, '保存された会話の起動中にCLIが終了しました。タブの出力とCLIの認証状態を確認し、再試行してください。')
+      }
+      const preserveFailedRestore = tabSavedResumeDescriptors.has(id) && tabResumeErrors.has(id)
+      if (prevProc === 'claude' && !preserveFailedRestore) {
         info.hadClaude = false
         info.claudeSessionId = null
         info.claudeResumeParentId = null
@@ -1521,11 +1537,11 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
         info.launchModel = null
         info.pendingSessionTitle = null
       }
-      if (prevProc === 'gemini') {
+      if (prevProc === 'gemini' && !preserveFailedRestore) {
         info.hadGemini = false
         info.geminiSessionFile = null
       }
-      if (prevProc === 'codex') {
+      if (prevProc === 'codex' && !preserveFailedRestore) {
         info.hadCodex = false
         info.codexSessionId = null
         info.pendingSessionTitle = null
@@ -1533,12 +1549,45 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
       info.latestInput = ''
       tabInputBuf.delete(id)
       tabInputUncertain.delete(id)
+      if (!preserveFailedRestore) tabSavedResumeDescriptors.delete(id)
     }
   }
 
   // cwd is now updated via OSC 7 escape sequences emitted by the shell hook.
   // No lsof call needed here.
   tabInfo.set(id, info)
+}
+
+function markShellReady(id: string) {
+  tabShellReady.add(id)
+  const waiters = tabShellReadyWaiters.get(id)
+  if (!waiters) return
+  tabShellReadyWaiters.delete(id)
+  for (const resolve of waiters) resolve(true)
+}
+
+function waitForShellReady(id: string, timeoutMs = 10000): Promise<boolean> {
+  if (tabShellReady.has(id)) return Promise.resolve(true)
+  return new Promise((resolve) => {
+    let waiters = tabShellReadyWaiters.get(id)
+    if (!waiters) { waiters = new Set(); tabShellReadyWaiters.set(id, waiters) }
+    const finish = (ready: boolean) => {
+      clearTimeout(timer)
+      waiters!.delete(finish)
+      if (waiters!.size === 0) tabShellReadyWaiters.delete(id)
+      resolve(ready)
+    }
+    waiters.add(finish)
+    const timer = setTimeout(() => finish(false), timeoutMs)
+  })
+}
+
+function setResumeError(id: string, reason: string) {
+  const message = `復元できません: ${reason}`
+  tabResumeErrors.set(id, message)
+  const info = tabInfo.get(id)
+  if (info) info.resuming = false
+  mainWindow?.webContents.send('terminal:data', id, `\r\n\x1b[31m[Agent Conductor] ${message}\x1b[0m\r\n`)
 }
 
 function spawnPty(cwd?: string, handoff?: { agent: ResumableAgent; prompt: string; sessionId: string | null; token: string; resumeSessionId?: string }, logicalId?: string): { id: string; ptyProcess: ReturnType<typeof pty.spawn> } {
@@ -1608,9 +1657,12 @@ function spawnPty(cwd?: string, handoff?: { agent: ResumableAgent; prompt: strin
   ptyProcess.onData((data: string) => {
     if (ptyProcesses.get(id) !== ptyProcess) return
     // OSC 7: \033]7;file://hostname/path\007  or  \033]7;file://hostname/path\033\\
-    const osc7 = data.match(/\x1b\]7;file:\/\/[^\x07\x1b]*(?:\x07|\x1b\\)/)
+    const osc7Scan = consumeOsc7(tabOsc7Buf.get(id) || '', data)
+    tabOsc7Buf.set(id, osc7Scan.tail)
+    const osc7 = osc7Scan.sequences[osc7Scan.sequences.length - 1]
     if (osc7) {
-      const urlMatch = osc7[0].match(/\x1b\]7;file:\/\/([^\x07\x1b/]*)([^\x07\x1b]*)/)
+      markShellReady(id)
+      const urlMatch = osc7.match(/\x1b\]7;file:\/\/([^\x07\x1b/]*)([^\x07\x1b]*)/)
       if (urlMatch) {
         try {
           const decoded = decodeURIComponent(urlMatch[2])
@@ -1704,7 +1756,8 @@ function spawnPty(cwd?: string, handoff?: { agent: ResumableAgent; prompt: strin
       tabModelScanBuf.set(id, scanBuf.slice(Math.max(lastMatchEnd, scanBuf.length - 200)))
     }
 
-    // Detect --resume failure: "No conversation found" → fall back to fresh claude
+    // Detect an exact restore failure. Keep the saved identity and the shell so
+    // the user can retry; never replace it with a fresh conversation.
     if (tabResumeWatch.has(id)) {
       const stripped = combined
         .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
@@ -1715,25 +1768,10 @@ function spawnPty(cwd?: string, handoff?: { agent: ResumableAgent; prompt: strin
         tabResumeWatch.delete(id)
         const info = tabInfo.get(id)
         if (info) {
-          info.claudeSessionId = null
-          info.claudeResumeParentId = null
           info.hadClaude = true
-          // Fallback retries with plain `claude` (no --model) → model is unknown
-          // and the explicit launch flag is gone too.
-          info.model = null
-          info.launchModel = null
           tabInfo.set(id, info)
         }
-        // Wait for error to finish printing, then retry with plain claude
-        setTimeout(() => {
-          const proc = ptyProcesses.get(id)
-          if (proc) {
-            proc.write('claude\r')
-            // Re-start session watcher so the fresh claude's session file gets detected
-            const cwd = info?.cwd || HOME
-            startSessionWatch(id, cwd)
-          }
-        }, 1500)
+        setResumeError(id, '保存されたClaudeの会話が見つかりません。会話IDとセッションファイルを確認してください。')
       }
     }
 
@@ -2174,21 +2212,131 @@ function createWindow() {
   // Create a new terminal tab (optional cwd)
   // pendingSessionId pre-marks a Resume-created tab with its agent/session so
   // title sync and saveSession() work even before the CLI process starts.
-  ipcMain.handle('terminal:create', (_event, cwd?: string, pendingSessionId?: string, pendingAgent: ResumableAgent = 'claude') => {
-    const { id } = spawnPty(cwd)
-    if (pendingSessionId) {
-      const info = tabInfo.get(id)!
-      if (pendingAgent === 'codex' && isCodexUuid(pendingSessionId)) {
+  ipcMain.handle('terminal:create', (event, cwd?: string, pendingSessionId?: string, pendingAgent: ResumableAgent | 'gemini' = 'claude', restoreIndex?: number) => {
+    if (!mainWindow || event.sender?.isDestroyed?.()) throw new Error('ウィンドウが閉じられたため端末の作成を中止しました。')
+    const saved = Number.isInteger(restoreIndex) && restoreIndex! >= 0 ? loadedSessionSnapshot?.tabs[restoreIndex!] : undefined
+    let id: string
+    let cwdFailure = false
+    if (saved) {
+      try { cwdFailure = !fs.statSync(saved.cwd).isDirectory() }
+      catch { cwdFailure = true }
+    }
+    try { ({ id } = spawnPty(cwdFailure ? HOME : cwd)) }
+    catch (error) {
+      if (!saved) throw error
+      ;({ id } = spawnPty(HOME))
+      cwdFailure = true
+    }
+    sessionStateDisposed = false
+    const info = tabInfo.get(id)!
+    if (saved) {
+      tabRestoreIndexes.set(id, restoreIndex!)
+      tabSavedResumeDescriptors.set(id, { ...saved })
+      info.hadClaude = saved.hadClaude
+      info.claudeSessionId = saved.claudeSessionId
+      info.claudeResumeParentId = saved.claudeSessionId
+      info.hadGemini = saved.hadGemini
+      info.geminiSessionFile = saved.geminiSessionFile ?? null
+      info.hadCodex = saved.hadCodex
+      info.codexSessionId = saved.codexSessionId
+      info.launchModel = saved.model ?? null
+      info.model = saved.model ?? null
+      info.resuming = !!(saved.hadClaude || saved.hadGemini || saved.hadCodex)
+      if (cwdFailure) info.cwd = saved.cwd
+      tabInfo.set(id, info)
+      if (cwdFailure) setResumeError(id, `作業フォルダ ${saved.cwd} を開けません。フォルダを復元してから再試行してください。`)
+    } else if (pendingSessionId || pendingAgent === 'codex' || pendingAgent === 'gemini') {
+      if (pendingAgent === 'codex') {
         info.hadCodex = true
-        info.codexSessionId = pendingSessionId
-      } else {
+        info.codexSessionId = isCodexUuid(pendingSessionId || '') ? pendingSessionId! : null
+      } else if (pendingAgent === 'gemini') {
+        info.hadGemini = true
+        info.geminiSessionFile = pendingSessionId || null
+      } else if (pendingSessionId || Number.isInteger(restoreIndex)) {
         info.hadClaude = true
-        info.claudeResumeParentId = pendingSessionId
+        info.claudeResumeParentId = isCodexUuid(pendingSessionId || '') ? pendingSessionId! : null
       }
-      info.resuming = true
+      info.resuming = !!(info.hadClaude || info.hadCodex || info.hadGemini)
       tabInfo.set(id, info)
     }
     return id
+  })
+
+  ipcMain.handle('session:restore-saved-tab', async (_event, tabId: string, retry = false) => {
+    const info = tabInfo.get(tabId)
+    const proc = ptyProcesses.get(tabId)
+    if (!info || !proc || !tabOrder.includes(tabId)) return { ok: false, reason: '復元先のタブが見つかりません。' }
+    const existingError = tabResumeErrors.get(tabId)
+    if (existingError && !retry) return { ok: false, reason: existingError.replace(/^復元できません:\s*/, '') }
+    if (retry) {
+      let foreground = ''
+      try { foreground = path.basename(proc.process || '') } catch { /* exiting */ }
+      if (!SHELLS.has(foreground)) return { ok: false, reason: 'エージェントが動作中のため再試行できません。' }
+      tabResumeErrors.delete(tabId)
+      info.resuming = true
+    }
+    const descriptor = tabSavedResumeDescriptors.get(tabId)
+    const resumeInfo = descriptor ? { ...info, ...descriptor, launchModel: descriptor.model, cwd: descriptor.cwd } : info
+    if (descriptor && info.cwd !== descriptor.cwd) {
+      const reason = `作業フォルダ ${descriptor.cwd} で端末を起動できていません。フォルダを復元し、アプリを再起動してください。`
+      setResumeError(tabId, reason); return { ok: false, reason }
+    }
+    const result = savedResumeCommand(resumeInfo, HOME)
+    if (!result.ok) { setResumeError(tabId, result.reason); return result }
+    if (!result.command) { info.resuming = false; return { ok: true } }
+    if (result.agent === 'claude' && !sessionHasConversation(exactClaudeSessionId(resumeInfo)!, resumeInfo.cwd || HOME)) {
+      const reason = '保存されたClaudeの会話ファイルが見つからないか、会話内容を読み取れません。'
+      setResumeError(tabId, reason); return { ok: false, reason }
+    }
+    if (result.agent === 'codex') {
+      const id = exactCodexSessionId(resumeInfo)!
+      if (!listCodexSessions(resumeInfo.cwd || HOME).some(session => session.id.toLowerCase() === id.toLowerCase())) {
+        const reason = '保存されたCodexの会話ファイルが見つからないか、作業フォルダが一致しません。'
+        setResumeError(tabId, reason); return { ok: false, reason }
+      }
+    }
+    if (result.agent === 'gemini') {
+      try { if (!fs.statSync(resumeInfo.geminiSessionFile!).isFile()) throw new Error('not a file') }
+      catch {
+        const reason = '保存されたGeminiのセッションファイルが見つかりません。'
+        setResumeError(tabId, reason); return { ok: false, reason }
+      }
+    }
+    const shellName = path.basename(process.env.SHELL || 'zsh')
+    if (!['zsh', 'bash', 'fish'].includes(shellName)) {
+      const reason = `シェル ${shellName} では起動準備完了を確認できません。zsh、bash、fishのいずれかで再試行してください。`
+      setResumeError(tabId, reason); return { ok: false, reason }
+    }
+    if (!(await waitForShellReady(tabId)) || ptyProcesses.get(tabId) !== proc) {
+      const reason = 'シェルの起動準備完了を確認できませんでした。タブを開いて再試行してください。'
+      setResumeError(tabId, reason); return { ok: false, reason }
+    }
+    let foreground = ''
+    try { foreground = path.basename(proc.process || '') } catch { /* exiting */ }
+    if (!SHELLS.has(foreground) || tabInputBuf.get(tabId)?.trim() || tabInputUncertain.has(tabId) || switchController.blocked(tabId)) {
+      const reason = '復元待ちの間に端末が使われたため、自動起動を中止しました。入力を取り消してから再試行してください。'
+      setResumeError(tabId, reason); return { ok: false, reason }
+    }
+    tabResumeErrors.delete(tabId)
+    tabResumeCooldown.set(tabId, Date.now() + RESUME_COOLDOWN_MS)
+    const previousWatch = tabResumeWatch.get(tabId)
+    if (previousWatch) clearTimeout(previousWatch)
+    tabResumeWatch.set(tabId, setTimeout(() => {
+      tabResumeWatch.delete(tabId)
+      const current = tabInfo.get(tabId)
+      if (current?.resuming) setResumeError(tabId, '会話の起動完了を確認できませんでした。タブの出力とCLIの認証状態を確認してください。')
+      else if (!tabResumeErrors.has(tabId)) tabSavedResumeDescriptors.delete(tabId)
+    }, 30000))
+    proc.write(result.command)
+    return { ok: true }
+  })
+
+  ipcMain.on('session:set-active-tab', (_event, tabId: string) => {
+    if (tabOrder.includes(tabId)) activeLogicalTabId = tabId
+  })
+  ipcMain.on('session:restore-complete', () => {
+    if (!activeLogicalTabId && loadedSessionSnapshot) activeLogicalTabId = tabOrder[loadedSessionSnapshot.activeIndex] ?? tabOrder[0] ?? null
+    restoreCreationComplete = true
   })
 
   // Get title for a tab (poll from renderer)
@@ -2201,13 +2349,14 @@ function createWindow() {
     // 'attention' already implies non-stale detected choices (computeTabAgentStatus)
     const promptChoices = agentStatus === 'attention' ? extractPromptChoices(tabLastOutput.get(tabId) || '') : []
     const result: { issue: string; detail: string; model: string | null; activeAgents: ActiveAgent[]; agentStatus: TabAgentStatus; promptChoices: PromptChoice[] } = { ...getTabTitle(info), model: info.model, activeAgents: info.activeAgents, agentStatus, promptChoices }
+    const resumeError = tabResumeErrors.get(tabId)
+    if (resumeError) result.detail = resumeError
     // If detail fell back to directory name (latestInput is empty), try to populate
     // from session file so resumed tabs show last response instead of "~"
     if (result.detail === shortDir(info.cwd)) {
       if (info.hadClaude) {
         const cwd = info.cwd || HOME
-        let sessionId = info.claudeSessionId
-        if (!sessionId) sessionId = getRecentClaudeSessions(cwd)[0] || null
+        const sessionId = exactClaudeSessionId(info)
         let text = getLastSessionText(sessionId, cwd)
         if (!text && info.claudeResumeParentId && info.claudeResumeParentId !== sessionId) {
           text = getLastSessionText(info.claudeResumeParentId, cwd)
@@ -2215,7 +2364,7 @@ function createWindow() {
         if (text) result.detail = text
       } else if (info.hadGemini) {
         const cwd = info.cwd || HOME
-        const sessionFile = info.geminiSessionFile || getLastGeminiSessionFile(cwd)
+        const sessionFile = info.geminiSessionFile
         const text = getLastGeminiSessionText(sessionFile)
         if (text) result.detail = text
       }
@@ -2273,8 +2422,7 @@ function createWindow() {
         } else if (isClaudeRunning) {
           // Claude idle — show last assistant text from JSONL
           const cwd = info!.cwd || HOME
-          let sessionId = info!.claudeSessionId
-          if (!sessionId) sessionId = getRecentClaudeSessions(cwd)[0] || null
+          const sessionId = exactClaudeSessionId(info!)
           lastOutput = getLastSessionText(sessionId, cwd)
           // If current session is empty (e.g. just resumed, no new messages yet),
           // fall back to the parent session which has the prior conversation
@@ -2284,9 +2432,7 @@ function createWindow() {
         } else if (isGeminiRunning) {
           // Gemini idle — show last response from session JSON
           const cwd = info!.cwd || HOME
-          let sessionFile = info!.geminiSessionFile
-          if (!sessionFile) sessionFile = getLastGeminiSessionFile(cwd)
-          lastOutput = getLastGeminiSessionText(sessionFile)
+          lastOutput = getLastGeminiSessionText(info!.geminiSessionFile)
         } else {
           lastOutput = extractLastLine(tabLastOutput.get(id) || '')
         }
@@ -2336,6 +2482,15 @@ function createWindow() {
     tabSentAgentMsgKeys.clear()
     tabAgentMarkerSeen.clear()
     tabAgentOscBuf.clear()
+    tabResumeErrors.clear()
+    tabShellReady.clear()
+    for (const waiters of tabShellReadyWaiters.values()) for (const resolve of waiters) resolve(false)
+    tabShellReadyWaiters.clear()
+    tabOsc7Buf.clear()
+    tabRestoreIndexes.clear()
+    tabSavedResumeDescriptors.clear()
+    activeLogicalTabId = null
+    sessionStateDisposed = false
     for (const t of tabResumeWatch.values()) clearTimeout(t)
     tabResumeWatch.clear()
     for (const w of tabSessionWatchers.values()) clearInterval(w)
@@ -2348,7 +2503,9 @@ function createWindow() {
     // Keep runtime IDs monotonic: cancelled async handoffs may still unwind.
     closedTabsHistory.length = 0
 
-    return loadSession()
+    loadedSessionSnapshot = loadSession()
+    restoreCreationComplete = !loadedSessionSnapshot
+    return loadedSessionSnapshot
   })
 
   // Close a terminal tab
@@ -2404,6 +2561,14 @@ function createWindow() {
     tabSentAgentMsgKeys.delete(tabId)
     tabAgentMarkerSeen.delete(tabId)
     tabAgentOscBuf.delete(tabId)
+    tabResumeErrors.delete(tabId)
+    tabShellReady.delete(tabId)
+    tabOsc7Buf.delete(tabId)
+    const readyWaiters = tabShellReadyWaiters.get(tabId)
+    if (readyWaiters) for (const resolve of readyWaiters) resolve(false)
+    tabShellReadyWaiters.delete(tabId)
+    tabRestoreIndexes.delete(tabId)
+    tabSavedResumeDescriptors.delete(tabId)
     const sw = tabSessionWatchers.get(tabId)
     if (sw) { clearInterval(sw); tabSessionWatchers.delete(tabId) }
     const cw = tabCodexSessionWatchers.get(tabId)
@@ -2489,6 +2654,16 @@ function createWindow() {
     // still bound to this tab instead of falling back to another recent session.
     const inputInfo = tabInfo.get(tabId)
     if (proc && isEnter && isAgentTab(inputInfo)) {
+      // A submitted prompt proves the restored CLI is usable. From this point
+      // a later intentional exit should behave like a normal agent → shell
+      // transition instead of being reported as startup failure.
+      if (tabSavedResumeDescriptors.has(tabId)) {
+        const startupWatch = tabResumeWatch.get(tabId)
+        if (startupWatch) clearTimeout(startupWatch)
+        tabResumeWatch.delete(tabId)
+        tabSavedResumeDescriptors.delete(tabId)
+        tabResumeErrors.delete(tabId)
+      }
       if (inputInfo?.hadClaude && !inputInfo.claudeSessionId && !inputInfo.claudeResumeParentId && !tabSessionWatchers.has(tabId)) {
         startSessionWatch(tabId, inputInfo.cwd || HOME)
       }
@@ -2518,7 +2693,13 @@ function createWindow() {
         if (/^gemini(\s|$)/.test(input)) {
           info.hadGemini = true
           tabInfo.set(tabId, info)
-          startGeminiSessionWatch(tabId, info.cwd || HOME)
+          if (/--session-file\s+/.test(input)) {
+            // Exact saved file is already attached to this tab. A new-file
+            // watcher could bind another same-cwd tab's session.
+            tabResumeCooldown.set(tabId, Date.now() + RESUME_COOLDOWN_MS)
+          } else {
+            startGeminiSessionWatch(tabId, info.cwd || HOME)
+          }
           if (/--resume/.test(input)) {
             tabResumeCooldown.set(tabId, Date.now() + RESUME_COOLDOWN_MS)
           }
@@ -2537,7 +2718,7 @@ function createWindow() {
             tabResumeCooldown.set(tabId, Date.now() + RESUME_COOLDOWN_MS)
           }
           tabInfo.set(tabId, info)
-          startCodexSessionWatch(tabId, info.cwd || HOME)
+          if (!resumeMatch) startCodexSessionWatch(tabId, info.cwd || HOME)
         }
 
         // Detect "claude" command being launched from shell → snapshot NOW before file is created
@@ -2557,15 +2738,15 @@ function createWindow() {
           // If resuming a specific session, save the ID directly
           const resumeMatch = input.match(/--resume\s+([a-f0-9-]{36})/)
           if (resumeMatch) {
-            // Save the parent session ID as fallback; watcher will update claudeSessionId
-            // to the new continuation file Claude creates on --resume
+            // The requested parent ID is the canonical restart identity. Do not
+            // watch continuation files: concurrent same-cwd resumes can create
+            // indistinguishable files and cross-bind tabs.
             info.claudeSessionId = resumeMatch[1]
             info.claudeResumeParentId = resumeMatch[1]
             tabInfo.set(tabId, info)
-            startSessionWatch(tabId, info.cwd || HOME)
             // Suppress [[SEND:]] detection during resume replay
             tabResumeCooldown.set(tabId, Date.now() + RESUME_COOLDOWN_MS)
-            // Watch for resume failure; auto-fallback to plain claude if detected
+            // Watch only to surface a failed exact resume.
             const prevWatch = tabResumeWatch.get(tabId)
             if (prevWatch) clearTimeout(prevWatch)
             tabResumeWatch.set(tabId, setTimeout(() => tabResumeWatch.delete(tabId), 15000))
@@ -2898,6 +3079,7 @@ function createWindow() {
   mainWindow.on('closed', () => {
     // Save session before cleanup
     saveSession()
+    sessionStateDisposed = true
     switchController.clear()
 
     for (const timer of tabTimers.values()) clearInterval(timer)

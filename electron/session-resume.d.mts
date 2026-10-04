@@ -1,0 +1,10 @@
+export const SESSION_SCHEMA_VERSION: number;
+export const UUID_RE: RegExp;
+export function exactClaudeSessionId(info: any): string | null;
+export function exactCodexSessionId(info: any): string | null;
+export function selectedIndex(tabOrder: string[], activeTabId: string | null): number;
+export function mergeRestoreSnapshot<T extends { tabs: any[] }>(original: T | null, liveByIndex: Map<number, any>, restoreComplete: boolean): T | null;
+export function exactGeminiSessionFile(file: unknown, cwd: string, home: string): string | null;
+export function shellQuote(value: unknown): string;
+export function consumeOsc7(previous: string, data: string): { sequences: string[]; tail: string };
+export function savedResumeCommand(info: any, home: string): { ok: false; reason: string } | { ok: true; command: string | null; agent: 'claude' | 'codex' | 'gemini' | null };

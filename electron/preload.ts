@@ -23,8 +23,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('terminal:reset', listener)
   },
   // Terminal lifecycle
-  createTerminal: (cwd?: string, pendingSessionId?: string, pendingAgent?: 'claude' | 'codex') =>
-    ipcRenderer.invoke('terminal:create', cwd, pendingSessionId, pendingAgent) as Promise<string>,
+  createTerminal: (cwd?: string, pendingSessionId?: string, pendingAgent?: 'claude' | 'codex' | 'gemini', restoreIndex?: number) =>
+    ipcRenderer.invoke('terminal:create', cwd, pendingSessionId, pendingAgent, restoreIndex) as Promise<string>,
   createWorktreeTerminal: (tabId: string, branchName?: string) =>
     ipcRenderer.invoke('terminal:create-worktree', tabId, branchName) as Promise<
       { ok: true; tabId: string; worktreePath: string; branch: string } | { ok: false; error: string }
@@ -79,7 +79,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Session persistence
   loadSession: () =>
-    ipcRenderer.invoke('session:load') as Promise<{ tabs: Array<{ issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null; model: string | null }>; activeIndex: number } | null>,
+    ipcRenderer.invoke('session:load'),
+  restoreSavedSession: (tabId: string, retry = false) =>
+    ipcRenderer.invoke('session:restore-saved-tab', tabId, retry) as Promise<{ ok: boolean; reason?: string }>,
+  setActiveSessionTab: (tabId: string) => ipcRenderer.send('session:set-active-tab', tabId),
+  finishSessionRestore: () => ipcRenderer.send('session:restore-complete'),
 
   // Agent-to-agent message notifications ([[SEND: dest :: body]] routing results)
   onAgentMsgNotify: (cb: (payload: { type: 'queued' | 'delivered' | 'error'; from: string; dest: string; body: string }) => void) => {
