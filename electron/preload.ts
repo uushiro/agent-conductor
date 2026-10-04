@@ -1,6 +1,27 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  getHandoffDraft: (tabId: string) => ipcRenderer.invoke('terminal:handoff-draft', tabId),
+  setHandoffDraft: (tabId: string, text: string) => ipcRenderer.invoke('terminal:set-handoff-draft', tabId, text),
+  getHandoffDraftDestination: (tabId: string) => ipcRenderer.invoke('terminal:handoff-draft-destination', tabId),
+  submitHandoffDraft: (tabId: string, revision: number, destination: string, submit = true) => ipcRenderer.invoke('terminal:submit-handoff-draft', tabId, revision, destination, submit),
+  restoreHandoffSession: (tabId: string, lineage: unknown) => ipcRenderer.invoke('terminal:restore-handoff-session', tabId, lineage),
+  // Same-visible-tab Agent Conductor handoff
+  getAgentSwitchContext: (tabId: string) => ipcRenderer.invoke('terminal:agent-switch-context', tabId),
+  getAgentSwitchState: (tabId: string) => ipcRenderer.invoke('terminal:agent-switch-state', tabId),
+  switchAgent: (tabId: string, target: 'claude' | 'codex') =>
+    ipcRenderer.invoke('terminal:switch-agent', tabId, target) as Promise<{ ok: boolean; error?: string }>,
+  cancelAgentSwitch: (tabId: string) => ipcRenderer.invoke('terminal:cancel-agent-switch', tabId) as Promise<void>,
+  getAgentSwitchRecovery: (tabId: string) => ipcRenderer.invoke('terminal:agent-switch-recovery', tabId),
+  sendAgentSwitchRecoveryInput: (tabId: string, data: string) => ipcRenderer.invoke('terminal:agent-switch-recovery-input', tabId, data),
+  resizeAgentSwitchRecovery: (tabId: string, cols: number, rows: number) => ipcRenderer.invoke('terminal:agent-switch-recovery-resize', tabId, cols, rows),
+  getAgentSwitchMetrics: () => ipcRenderer.invoke('terminal:agent-switch-metrics'),
+  acknowledgeAgentSwitchRender: (tabId: string, token: string) => ipcRenderer.send('terminal:agent-switch-rendered', tabId, token),
+  onTerminalReset: (callback: (tabId: string, data: string, token?: string) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, tabId: string, data: string, token?: string) => callback(tabId, data, token)
+    ipcRenderer.on('terminal:reset', listener)
+    return () => ipcRenderer.removeListener('terminal:reset', listener)
+  },
   // Terminal lifecycle
   createTerminal: (cwd?: string, pendingSessionId?: string, pendingAgent?: 'claude' | 'codex') =>
     ipcRenderer.invoke('terminal:create', cwd, pendingSessionId, pendingAgent) as Promise<string>,
@@ -21,8 +42,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener('terminal:data', listener)
     }
   },
-  sendTerminalInput: (tabId: string, data: string) => {
-    ipcRenderer.send('terminal:input', tabId, data)
+  sendTerminalInput: (tabId: string, data: string, requireUnswitched = false) => {
+    ipcRenderer.send('terminal:input', tabId, data, requireUnswitched)
   },
   sendChoice: (tabId: string, num: string) =>
     ipcRenderer.invoke('terminal:send-choice', tabId, num) as Promise<void>,

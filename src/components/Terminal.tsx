@@ -1,4 +1,4 @@
-import { useEffect, useRef, type CSSProperties } from 'react'
+import { useCallback, useEffect, useRef, type CSSProperties } from 'react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -14,6 +14,8 @@ interface TerminalProps {
   paneStyle?: CSSProperties
   /** Called when the user interacts with this terminal (focus the pane) */
   onFocusRequest?: () => void
+  /** Input is temporarily blocked while this tab is being handed to another CLI. */
+  inputDisabled?: boolean
 }
 
 // xterm の SelectionService#selectionText は、複数行ドラッグの終点が
@@ -31,10 +33,30 @@ function stripTrailingSelectionNewline(text: string): string {
   return text.replace(/\r?\n$/, '')
 }
 
-export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocusRequest }: TerminalProps) {
+export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocusRequest, inputDisabled = false }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<XTerm | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
+  const inputDisabledRef = useRef(inputDisabled)
+  const visibleRef = useRef(visible)
+  const focusedRef = useRef(focused)
+  // Reset output can arrive before the handoff state has re-enabled input.
+  // Keep its token until this pane is visibly focused and actually usable.
+  const pendingRenderTokenRef = useRef<string | null>(null)
+  const resetWriteCompleteRef = useRef(false)
+  const acknowledgeRenderedReset = useCallback(() => {
+    const token = pendingRenderTokenRef.current
+    const term = terminalRef.current
+    if (!token || !term || !resetWriteCompleteRef.current || inputDisabledRef.current || !visibleRef.current || !focusedRef.current) return
+    // A handoff can finish while the user is drafting in the shared composer.
+    // Keep that editing focus; terminal input is ready without stealing it.
+    if (!document.activeElement?.classList.contains('terminal-input-textarea')) term.focus()
+    window.electronAPI.acknowledgeAgentSwitchRender(tabId, token)
+    pendingRenderTokenRef.current = null
+  }, [tabId])
+  inputDisabledRef.current = inputDisabled
+  visibleRef.current = visible
+  focusedRef.current = focused
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -130,6 +152,8 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
         return false // xtermに処理させず、元のイベントのバブリングでdocumentハンドラに届ける
       }
 
+      if (inputDisabledRef.current) return false
+
       if ((ev.key === 'Backspace' || ev.key === 'Delete') && term.hasSelection()) {
         const selected = term.getSelection()
         // Strip newlines (wrapped lines) and count characters
@@ -146,7 +170,7 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
 
     // Relay keyboard input → main process (with tabId)
     term.onData((data) => {
-      window.electronAPI.sendTerminalInput(tabId, data)
+      if (!inputDisabledRef.current) window.electronAPI.sendTerminalInput(tabId, data)
     })
 
     // Receive pty output → render (filter by tabId)
@@ -156,6 +180,28 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
       }
     }
     const removeDataListener = window.electronAPI.onTerminalData(handler)
+
+    const removeResetListener = window.electronAPI.onTerminalReset((incomingTabId, data, renderToken) => {
+      if (incomingTabId !== tabId) return
+      pendingRenderTokenRef.current = null
+      resetWriteCompleteRef.current = false
+      term.reset()
+      const restoreGeometry = () => {
+        // A same-tab handoff replaces the PTY, not the DOM container, so a
+        // ResizeObserver callback is not guaranteed. The new CLI starts at
+        // 80x24 and must receive the existing pane's actual dimensions.
+        fitAddon.fit()
+        window.electronAPI.resizeTerminal(tabId, term.cols, term.rows)
+        // term.write invokes this callback only once its buffered reset content
+        // has reached xterm. Do not measure it yet: the status poll may still
+        // be disabling keyboard input for this pane.
+        resetWriteCompleteRef.current = true
+        if (renderToken) pendingRenderTokenRef.current = renderToken
+        acknowledgeRenderedReset()
+      }
+      if (data) term.write(data, restoreGeometry)
+      else restoreGeometry()
+    })
 
     // Handle resize
     const resizeObserver = new ResizeObserver(() => {
@@ -183,13 +229,14 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
 
     return () => {
       removeDataListener()
+      removeResetListener()
       resizeObserver.disconnect()
       containerRef.current?.removeEventListener('mousedown', handleMouseDown)
       containerRef.current?.removeEventListener('mouseup', handleMouseUp)
       if (xtermScreen) xtermScreen.removeEventListener('mousedown', handleForceSelection, true)
       term.dispose()
     }
-  }, [tabId])
+  }, [tabId, acknowledgeRenderedReset])
 
   // Update font size dynamically
   useEffect(() => {
@@ -218,11 +265,17 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
     }
   }, [visible, tabId])
 
+  useEffect(() => {
+    if (terminalRef.current) terminalRef.current.options.cursorBlink = !inputDisabled
+    acknowledgeRenderedReset()
+  }, [inputDisabled, visible, focused, acknowledgeRenderedReset])
+
   return (
     <div
       ref={containerRef}
       data-tab-id={tabId}
       className={`terminal-container${focused ? ' terminal-container--focused' : ''}`}
+      aria-busy={inputDisabled || undefined}
       style={{ display: visible ? undefined : 'none', userSelect: 'none', WebkitUserSelect: 'none', ...paneStyle }}
       onMouseDown={onFocusRequest}
     />

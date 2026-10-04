@@ -3,6 +3,11 @@ import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs'
 import https from 'node:https'
+import { randomUUID } from 'node:crypto'
+import { readHandoffSession, buildHandoffPrompt } from './agent-handoff.mjs'
+import { AgentSwitchController } from './agent-switch.mjs'
+import { HandoffDrafts } from './handoff-draft.mjs'
+import { findSessionNotes } from './handoff-notes.mjs'
 import { execFile } from 'node:child_process'
 import { readClaudeSessionTitle } from './claude-session-title.mjs'
 
@@ -86,6 +91,7 @@ interface ClosedTabEntry {
 }
 const closedTabsHistory: ClosedTabEntry[] = []
 const tabInputBuf = new Map<string, string>()
+const tabInputUncertain = new Map<string, boolean>()
 const tabLastOutput = new Map<string, string>()
 const tabLastOutputAt = new Map<string, number>()
 const tabLastInputAt = new Map<string, number>()
@@ -285,12 +291,12 @@ const AGENT_MSG_BUSY_MS = 3000
 // Resolve a destination tab by issue (tab name): exact match first, then prefix match.
 // Returns null when not found or ambiguous.
 function resolveTabByName(name: string, excludeTabId: string): string | null {
-  const candidates = tabOrder.filter((id) => id !== excludeTabId)
-  const exact = candidates.filter((id) => (tabInfo.get(id)?.issue || '') === name)
+  const candidates = tabOrder.filter((id) => id !== switchController.owner(excludeTabId))
+  const exact = candidates.filter((id) => (tabInfo.get(switchController.active(id))?.issue || '') === name)
   if (exact.length === 1) return exact[0]
   if (exact.length > 1) return null
   const prefix = candidates.filter((id) => {
-    const issue = tabInfo.get(id)?.issue || ''
+    const issue = tabInfo.get(switchController.active(id))?.issue || ''
     return issue !== '' && issue.startsWith(name)
   })
   if (prefix.length === 1) return prefix[0]
@@ -318,6 +324,7 @@ function deliverAgentMsg(msg: AgentMsg) {
   if (!proc) return
   const text = `[from: ${msg.fromName}] ${msg.body}`
   proc.write('\x1b[200~' + text + '\x1b[201~')
+  tabInputBuf.set(msg.toTabId, (tabInputBuf.get(msg.toTabId) || '') + text)
   mainWindow?.webContents.send('agent-msg:notify', {
     type: 'delivered', from: msg.fromName, dest: tabInfo.get(msg.toTabId)?.issue || msg.toTabId, body: msg.body,
   })
@@ -354,6 +361,7 @@ function parseUserSendCommand(line: string): { dest: string; body: string } | nu
 // PTY output stream, so it can't be re-detected by redraws — and a user re-typing the
 // same text clearly intends a re-send. Output-side detection always goes through dedup.
 function handleAgentSend(fromTabId: string, destName: string, body: string, opts?: { bypassDedup?: boolean }) {
+  if (switchController.blocked(fromTabId)) return
   const now = Date.now()
   if (!opts?.bypassDedup) {
     // Output-side detections come from PTY repaints where the TUI may have re-wrapped
@@ -382,7 +390,8 @@ function handleAgentSend(fromTabId: string, destName: string, body: string, opts
   }
 
   const fromName = tabInfo.get(fromTabId)?.issue || fromTabId
-  const toTabId = resolveTabByName(destName, fromTabId)
+  const logicalDest = resolveTabByName(destName, fromTabId)
+  const toTabId = logicalDest ? switchController.active(logicalDest) : null
   if (!toTabId) {
     console.log(`[agent-msg] 宛先が見つからない: "${destName}" (from: ${fromName})`)
     mainWindow?.webContents.send('agent-msg:notify', {
@@ -410,6 +419,7 @@ setInterval(() => {
   const deliveredTo = new Set<string>()
   for (let i = 0; i < agentMsgQueue.length; ) {
     const msg = agentMsgQueue[i]
+    if (switchController.blocked(msg.toTabId)) { i++; continue }
     if (!ptyProcesses.has(msg.toTabId)) {
       console.log(`[agent-msg] 宛先タブが閉じられたため破棄: ${msg.toTabId}`)
       agentMsgQueue.splice(i, 1)
@@ -679,11 +689,17 @@ interface SavedTab {
   // Launch-flag model only (tabInfo.launchModel) — restored as `claude --model X`.
   // The display model is not persisted; the banner re-detects it after restore.
   model: string | null
+  handoff?: {
+    active: { agent: ResumableAgent; sessionId: string; cwd: string; claudeResumeParentId?: string | null }
+    parked: Array<{ agent: ResumableAgent; sessionId: string; cwd: string; claudeResumeParentId?: string | null }>
+    context?: unknown
+    history?: Array<{ agent: ResumableAgent; text: string }>
+  }
 }
 
 // schemaVersion 2 (v2.14.4): `model` is the explicit launch flag, not the banner-detected
 // display model. Files without schemaVersion are v1 and their `model` is untrusted.
-const SESSION_SCHEMA_VERSION = 2
+const SESSION_SCHEMA_VERSION = 3
 
 interface SavedSession {
   schemaVersion?: number
@@ -728,8 +744,13 @@ function getRecentClaudeSessions(cwd: string): string[] {
 function saveSession() {
   const tabs: SavedTab[] = []
   for (const id of tabOrder) {
-    const info = tabInfo.get(id)
+    const info = tabInfo.get(switchController.active(id))
     if (info) {
+      const group = switchController.groups.get(id)
+      const committedRecovery = group?.recovery as { created?: boolean; runtime?: string } | null | undefined
+      const committedMembers = group ? [...group.members].filter(runtime => !(committedRecovery?.created && committedRecovery.runtime === runtime)) : []
+      const linked = !!group && !group.pending && (committedMembers.length > 1 || group.parked?.size > 0)
+      const exactLineage = linked || !!(group as any)?.committedLineage
       const hadClaude = info.hadClaude
       let claudeSessionId: string | null = null
 
@@ -753,7 +774,7 @@ function saveSession() {
         // Fallback: if no valid session was found, pick the most recent session
         // with conversation content for this cwd (handles /resume inside Claude
         // and cross-tab watcher contamination).
-        if (!claudeSessionId) {
+        if (!claudeSessionId && !exactLineage) {
           const recentSessions = getRecentClaudeSessions(info.cwd || HOME)
           for (const sid of recentSessions.slice(0, 10)) {
             if (sessionHasConversation(sid, info.cwd || HOME)) {
@@ -772,11 +793,27 @@ function saveSession() {
         hadGemini: info.hadGemini,
         hadCodex: info.hadCodex,
         codexSessionId: info.hadCodex
-          ? (isCodexUuid(info.codexSessionId) ? info.codexSessionId : getLastCodexSessionId(info.cwd || HOME))
+          ? (isCodexUuid(info.codexSessionId) ? info.codexSessionId : exactLineage ? null : getLastCodexSessionId(info.cwd || HOME))
           : null,
         // Persist the launch flag, not the display model (see tabInfo.launchModel).
         model: info.launchModel,
+        handoff: linked && ((info.hadClaude ? info.claudeSessionId || info.claudeResumeParentId : info.codexSessionId)) ? {
+          active: { agent: info.hadClaude ? 'claude' : 'codex', sessionId: (info.hadClaude ? info.claudeSessionId || info.claudeResumeParentId : info.codexSessionId)!, cwd: info.cwd || HOME, claudeResumeParentId: info.claudeResumeParentId },
+          parked: [
+            ...committedMembers.filter(runtime => runtime !== switchController.active(id)).map(runtime => {
+              const parked = tabInfo.get(runtime)!; return { agent: parked.hadClaude ? 'claude' as const : 'codex' as const, sessionId: (parked.hadClaude ? parked.claudeSessionId || parked.claudeResumeParentId : parked.codexSessionId) || '', cwd: parked.cwd || HOME, claudeResumeParentId: parked.claudeResumeParentId }
+            }).filter(item => !!item.sessionId),
+            ...[...group.parked.values()],
+          ],
+          context: group.context.exportSnapshot(), history: group.history,
+        } : undefined,
       })
+      // A later in-flight handoff has no committed target yet. Keep the last
+      // known-good exact lineage rather than degrading this save to a loose
+      // single-session restore (and never persist the pending created runtime).
+      const savedTab = tabs[tabs.length - 1]
+      if ((group?.pending || group?.recovery || group?.errorCode?.startsWith('saved_') || !linked) && (group as any)?.committedLineage) savedTab.handoff = (group as any).committedLineage
+      else if (savedTab.handoff) (group as any).committedLineage = savedTab.handoff
     }
   }
   const session: SavedSession = { schemaVersion: SESSION_SCHEMA_VERSION, tabs: tabs.slice(0, 15), activeIndex: 0 }
@@ -794,7 +831,7 @@ function loadSession(): SavedSession | null {
       // (last-wins), so it cannot be trusted as an explicit user choice. Drop it and let
       // the CLI default (~/.claude/settings.json) apply; the user re-picks via the model
       // chip if they want a pin. The next saveSession() writes v2 with launchModel.
-      if ((session.schemaVersion ?? 1) < SESSION_SCHEMA_VERSION) {
+      if ((session.schemaVersion ?? 1) < 2) {
         for (const tab of session.tabs) tab.model = null
       }
       return session
@@ -1456,6 +1493,7 @@ function autoTitle(input: string): string {
 }
 
 function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
+  if (ptyProcesses.get(id) !== ptyProcess) return
   const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGemini: false, geminiSessionFile: null as string | null, hadCodex: false, codexSessionId: null as string | null, resuming: false, model: null as string | null, launchModel: null as string | null, activeAgents: [] as ActiveAgent[], pendingSessionTitle: null as string | null }
   const prevProc = info.proc
 
@@ -1494,6 +1532,7 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
       }
       info.latestInput = ''
       tabInputBuf.delete(id)
+      tabInputUncertain.delete(id)
     }
   }
 
@@ -1502,14 +1541,16 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
   tabInfo.set(id, info)
 }
 
-function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty.spawn> } {
-  const id = `tab-${++tabCounter}`
+function spawnPty(cwd?: string, handoff?: { agent: ResumableAgent; prompt: string; sessionId: string | null; token: string; resumeSessionId?: string }, logicalId?: string): { id: string; ptyProcess: ReturnType<typeof pty.spawn> } {
+  const id = logicalId || `tab-${++tabCounter}`
   const shell = process.env.SHELL || (os.platform() === 'win32' ? 'powershell.exe' : 'zsh')
   const initialCwd = cwd || HOME
   // Spawn as a login shell (like Terminal.app) so ~/.zprofile / ~/.bash_profile
   // are sourced. Without this, PATH set only there (e.g. the codex installer's
   // ~/.local/bin entry) is missing and the CLI appears as "command not found".
-  const shellArgs = ['zsh', 'bash', 'fish', 'sh'].includes(path.basename(shell)) ? ['-l'] : []
+  const shellArgs = handoff
+    ? ['-lc', `ac_prompt="$AC_HANDOFF_PROMPT"; unset AC_HANDOFF_PROMPT; exec ${handoff.agent === 'claude' ? (handoff.resumeSessionId ? `claude --resume ${handoff.resumeSessionId}` : `claude --session-id ${handoff.sessionId}`) : (handoff.resumeSessionId ? `codex resume ${handoff.resumeSessionId}` : 'codex')} "$ac_prompt"`]
+    : ['zsh', 'bash', 'fish', 'sh'].includes(path.basename(shell)) ? ['-l'] : []
   const ptyProcess = pty.spawn(shell, shellArgs, {
     name: 'xterm-256color',
     cols: 80,
@@ -1521,18 +1562,34 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
       // Let agents inside the tab know they run under Agent Conductor
       // (enables [[SEND: <tab> :: <body>]] inter-tab messaging awareness)
       env.AGENT_CONDUCTOR = '1'
+      if (handoff) env.AC_HANDOFF_PROMPT = handoff.prompt
       return env
     })(),
   })
 
   ptyProcesses.set(id, ptyProcess)
   tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null, hadCodex: false, codexSessionId: null, resuming: false, model: null, launchModel: null, activeAgents: [], pendingSessionTitle: null })
-  tabOrder.push(id)
+  if (!handoff) tabOrder.push(id)
+  else {
+    const info = tabInfo.get(id)!
+    info.hadClaude = handoff.agent === 'claude'
+    info.hadCodex = handoff.agent === 'codex'
+    info.claudeSessionId = handoff.agent === 'claude' ? handoff.sessionId : null
+    info.claudeResumeParentId = handoff.agent === 'claude' && handoff.resumeSessionId ? handoff.resumeSessionId : null
+    info.codexSessionId = handoff.agent === 'codex' ? handoff.resumeSessionId ?? null : null
+    info.proc = handoff.agent
+    handoffRuntimes.set(id, { agent: handoff.agent, token: handoff.token, startedAt: Date.now(), exited: false, output: '', transcriptSeen: false,
+      initialReceipt: handoff.resumeSessionId ? { prompt: handoff.prompt, token: handoff.token, startedAt: Date.now() } : undefined })
+    // Startup transcript echo must never route SEND markers into another tab.
+    tabResumeCooldown.set(id, Number.POSITIVE_INFINITY)
+    ptyProcess.onExit(() => { const runtime = handoffRuntimes.get(id); if (runtime) runtime.exited = true })
+  }
 
   // Inject shell hook to emit OSC 7 on every prompt (cwd tracking without lsof).
   // OSC 7 format: \033]7;file://hostname/cwd\007
   // We wait a tick so the shell is ready to accept input.
-  setTimeout(() => {
+  if (!handoff) setTimeout(() => {
+    if (ptyProcesses.get(id) !== ptyProcess) return
     const shellName = path.basename(shell)
     const hostname = os.hostname()
     if (shellName === 'zsh') {
@@ -1549,6 +1606,7 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
   // Relay pty output → renderer, and buffer last output for sidebar
   // Also parse OSC 7 sequences to track cwd without lsof.
   ptyProcess.onData((data: string) => {
+    if (ptyProcesses.get(id) !== ptyProcess) return
     // OSC 7: \033]7;file://hostname/path\007  or  \033]7;file://hostname/path\033\\
     const osc7 = data.match(/\x1b\]7;file:\/\/[^\x07\x1b]*(?:\x07|\x1b\\)/)
     if (osc7) {
@@ -1604,7 +1662,11 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
       ? data.replace(/Stop hook error[^\n\r\x1b]*/g, (m) => `\x1b[90m${m}\x1b[39m`)
       : data
 
-    mainWindow?.webContents.send('terminal:data', id, dataForRenderer)
+    handoffScreens.set(id, ((handoffScreens.get(id) || '') + dataForRenderer).slice(-131072))
+    const runtime = handoffRuntimes.get(id)
+    if (runtime) runtime.output = (runtime.output + dataForRenderer).slice(-131072)
+    const owner = switchController.owner(id)
+    if (switchController.active(owner) === id) mainWindow?.webContents.send('terminal:data', owner, dataForRenderer)
     const prev = tabLastOutput.get(id) || ''
     const combined = (prev + data).slice(-3000)
     tabLastOutput.set(id, combined)
@@ -1709,6 +1771,294 @@ function spawnPty(cwd?: string): { id: string; ptyProcess: ReturnType<typeof pty
   return { id, ptyProcess }
 }
 
+// The public tab ID stays stable. Parked runtimes are omitted from tabOrder and
+// cannot receive user input or queued agent messages until explicitly activated.
+const handoffRuntimes = new Map<string, { agent: ResumableAgent; token: string; startedAt: number; exited: boolean; output: string; transcriptSeen: boolean; initialReceipt?: { prompt: string; token: string; startedAt: number } }>()
+const handoffScreens = new Map<string, string>()
+
+type HandoffMetric = {
+  from: ResumableAgent | null; to: ResumableAgent; mode: 'new' | 'reuse'
+  outcome: 'success' | 'cancelled' | 'failed'; errorCode: string | null; startedAt: number
+  durations: { readMs: number; startMs: number; waitMs: number; activateMs: number; totalMs: number; rendererMs?: number }
+}
+const handoffMetrics: HandoffMetric[] = []
+let handoffMetricsLoaded = false
+const handoffRenderWait = new Map<string, { token: string; activatedAt: number; rendererMs?: number; metric?: HandoffMetric }>()
+function loadHandoffMetrics() {
+  if (handoffMetricsLoaded) return
+  handoffMetricsLoaded = true
+  try {
+    const file = path.join(app.getPath('userData'), 'handoff-metrics.json')
+    if (fs.statSync(file).size > 256 * 1024) return
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+    if (!Array.isArray(saved)) return
+    for (const value of saved.slice(-100)) {
+      if (!value || !['claude', 'codex'].includes(value.to) || !['new', 'reuse'].includes(value.mode) ||
+          !['success', 'cancelled', 'failed'].includes(value.outcome) || !Number.isFinite(value.startedAt)) continue
+      const durations: HandoffMetric['durations'] = { readMs: 0, startMs: 0, waitMs: 0, activateMs: 0, totalMs: 0 }
+      for (const key of ['readMs', 'startMs', 'waitMs', 'activateMs', 'totalMs', 'rendererMs'] as const) {
+        if (Number.isFinite(value.durations?.[key]) && value.durations[key] >= 0) durations[key] = value.durations[key]
+      }
+      handoffMetrics.push({ from: ['claude', 'codex'].includes(value.from) ? value.from : null, to: value.to,
+        mode: value.mode, outcome: value.outcome, errorCode: typeof value.errorCode === 'string' && /^[a-z_]{1,50}$/.test(value.errorCode) ? value.errorCode : null,
+        startedAt: value.startedAt, durations })
+    }
+  } catch { /* measurement history is optional */ }
+}
+function saveHandoffMetrics() {
+  try {
+    const file = path.join(app.getPath('userData'), 'handoff-metrics.json')
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file + '.tmp', JSON.stringify(handoffMetrics.slice(-100)))
+    fs.renameSync(file + '.tmp', file)
+  } catch { /* failed measurement storage must not block a handoff */ }
+}
+function recordHandoffMetric(metric: HandoffMetric, logicalId: string) {
+  loadHandoffMetrics()
+  const saved = { ...metric, durations: { ...metric.durations } }
+  handoffMetrics.push(saved)
+  if (handoffMetrics.length > 100) handoffMetrics.shift()
+  const render = handoffRenderWait.get(logicalId)
+  if (saved.outcome === 'success' && render) {
+    render.metric = saved
+    if (render.rendererMs !== undefined) saved.durations.rendererMs = render.rendererMs
+  }
+  saveHandoffMetrics()
+}
+
+async function preflightHandoff(agent: ResumableAgent, cwd: string) {
+  const loginShell = process.env.SHELL || '/bin/zsh'
+  if (!['zsh', 'bash'].includes(path.basename(loginShell))) {
+    throw Object.assign(new Error('切り替えはzsh/bashに対応しています。シェル設定を確認してください。'), { code: 'unsupported_shell' })
+  }
+  await new Promise<void>((resolve, reject) => {
+    execFile(loginShell, ['-lc', 'command -v "$1" >/dev/null', 'ac-handoff-check', agent],
+      { cwd, timeout: 5000, maxBuffer: 65536, env: { ...process.env, CLAUDECODE: '' } }, (error) => {
+        if (!error) return resolve()
+        const missing = error.code === 1
+        reject(Object.assign(new Error(missing
+          ? `${agent === 'claude' ? 'Claude' : 'Codex'}のCLIが見つかりません。導入とログインシェルのPATHを確認して再試行してください。`
+          : '切り替え先の起動確認ができませんでした。シェル設定と作業フォルダを確認してください。'), { code: missing ? 'cli_missing' : 'startup_check_failed' }))
+      })
+  })
+}
+
+
+function trackDraftInput(tabId: string, data: string) {
+  const parsed = data.replace(/\x1b\[20[01]~/g, '')
+  if (parsed.includes('\r')) {
+    tabInputBuf.set(tabId, '')
+    tabInputUncertain.delete(tabId)
+    return
+  }
+  if (data === '\x03') {
+    tabInputBuf.set(tabId, '')
+    tabInputUncertain.delete(tabId)
+  } else if (/\x1b(?:\[[0-9;]*[ABCDHF~]|[bfpn])/.test(parsed) || /[\x01\x04\x05\x09\x0e\x10\x12]/.test(parsed)) {
+    // History, completion and cursor editing can change text we cannot read
+    // back from the TUI. Fail closed until submission or explicit cancellation.
+    tabInputUncertain.set(tabId, true)
+  } else if (!parsed.startsWith('\x1b')) {
+    let buffer = Array.from(tabInputBuf.get(tabId) || '')
+    for (const char of parsed) {
+      if (char === '\x7f' || char === '\b') buffer.pop()
+      else if (char === '\x15' && !tabInputUncertain.get(tabId)) buffer = []
+      else if (char.codePointAt(0)! >= 32 || char === '\n') buffer.push(char)
+    }
+    tabInputBuf.set(tabId, buffer.join(''))
+  }
+}
+
+function recoveryRuntime(tabId: string) {
+  if (!tabOrder.includes(tabId)) return null
+  const id = switchController.recoveryRuntime(tabId)
+  return id && id !== switchController.active(tabId) ? id : null
+}
+
+
+function releaseHandoffRuntime(id: string) {
+  for (const timers of [tabTimers, tabSessionWatchers, tabCodexSessionWatchers, tabGeminiSessionWatchers]) {
+    const timer = timers.get(id)
+    if (timer) clearInterval(timer)
+    timers.delete(id)
+  }
+  const resumeTimer = tabResumeWatch.get(id)
+  if (resumeTimer) clearTimeout(resumeTimer)
+  tabResumeWatch.delete(id)
+  const proc = ptyProcesses.get(id)
+  ptyProcesses.delete(id)
+  try { proc?.kill() } catch { /* already exited */ }
+  for (const map of [tabInfo, tabInputBuf, tabInputUncertain, handoffRenderWait, tabLastOutput, tabLastOutputAt, tabLastInputAt,
+    tabDetectScanBuf, tabModelScanBuf, tabSentAgentMsgKeys, tabAgentMarkerSeen,
+    tabAgentOscBuf, tabResumeCooldown, handoffRuntimes, handoffScreens]) map.delete(id)
+  for (let i = agentMsgQueue.length - 1; i >= 0; i--) {
+    if (agentMsgQueue[i].toTabId === id || agentMsgQueue[i].fromTabId === id) agentMsgQueue.splice(i, 1)
+  }
+}
+
+async function readRuntimeHandoff(id: string) {
+  const info = tabInfo.get(id)
+  const runtime = handoffRuntimes.get(id)
+  const agent = runtime?.agent ?? (info?.hadClaude ? 'claude' : info?.hadCodex ? 'codex' : null)
+  const unavailable = (reason: string) => ({ agent, ready: false, reason, cwd: info?.cwd || HOME, lastEventAt: 0, lastAssistantText: '', text: '' })
+  if (!info || !agent || !isAgentTab(info) || runtime?.exited) return unavailable('ClaudeまたはCodexの会話を開始してください。')
+  if (tabInputUncertain.get(id)) return unavailable('編集中の入力を確認できません。送信するか、Ctrl+Cで入力を取り消してから切り替えてください。')
+  if (tabInputBuf.get(id)?.trim()) return unavailable('入力中の文章を送信、または消してから切り替えてください。')
+  if (info.activeAgents.some(a => a.status === 'started')) return unavailable('実行中のエージェントの完了を待っています。')
+  let sessionId = agent === 'claude' ? info.claudeSessionId || info.claudeResumeParentId : info.codexSessionId
+  // Codex does not expose a launch --session-id. Bind only a rollout containing
+  // our unpredictable handoff nonce, never the most recent file in a shared cwd.
+  if (!sessionId && runtime?.agent === 'codex') {
+    const dirs = new Set([codexDayDir(new Date(runtime.startedAt)), codexDayDir(new Date())])
+    const matches: string[] = []
+    for (const candidate of [...dirs].flatMap(listCodexRollouts).filter(e => e.mtime >= runtime.startedAt).slice(0, 50)) {
+      if (candidate.size > 8 * 1024 * 1024 || readCodexRolloutCwd(candidate.path) !== info.cwd) continue
+      const transcript = await readHandoffSession({ agent, sessionId: candidate.uuid, cwd: info.cwd, home: HOME })
+      if (transcript.text.includes(`AC_HANDOFF_READY:${runtime.token}`)) matches.push(candidate.uuid)
+    }
+    if (matches.length === 1) info.codexSessionId = sessionId = matches[0]
+  }
+  if (!sessionId) return unavailable('このタブの会話IDを確認しています。')
+  // Refuse duplicate ownership rather than risk handing another tab's work over.
+  for (const [otherId, other] of tabInfo) {
+    if (otherId !== id && (agent === 'claude' ? other.claudeSessionId === sessionId : other.codexSessionId === sessionId)) {
+      return unavailable('会話IDが別のタブと重複しています。切り替えを中止しました。')
+    }
+  }
+  const result = await readHandoffSession({ agent, sessionId, cwd: info.cwd, home: HOME })
+  if (runtime && result.text) runtime.transcriptSeen = true
+  if (runtime?.initialReceipt) {
+    const receipt = runtime.initialReceipt
+    const exactAck = result.lastAssistantText?.split(/\r?\n/).some(line => line.trim() === `AC_HANDOFF_READY:${receipt.token}`)
+    const group = switchController.groups.get(switchController.owner(id))
+    group?.context.registerReceipt(result, receipt.prompt, receipt.token)
+    if (!result.ready || result.lastEventAt < receipt.startedAt || !exactAck) {
+      return { ...result, cwd: info.cwd, ready: false, errorCode: undefined,
+        reason: '復元した会話の起動と引き継ぎ確認を待っています。初回設定が表示された場合は完了してください。' }
+    }
+    group?.context.merge(result)
+    delete runtime.initialReceipt
+  }
+  const ready = result.ready && result.lastEventAt >= (tabLastInputAt.get(id) || 0)
+  const unsupported = /malformed|unrecognized|invalid session|metadata|ambiguous|subagent|escapes|exceeds|limit reached/.test(result.reason)
+  return { ...result, cwd: info.cwd, ready, errorCode: unsupported ? 'transcript_unsupported' : undefined,
+    reason: ready ? '' : unsupported ? '会話ログの形式・識別情報・サイズを確認できません。対応するCLIと会話を確認してください。'
+      : '会話の完了を確認しています。処理が終わっても続く場合は会話ログを確認してください。' }
+
+}
+
+// Notes are supplementary context, refreshed at preview/send time rather than
+// copied into the canonical ledger on every round trip.
+async function enrichHandoffSource(source: any, runtimes: string[] = [], parked: Array<{ agent: ResumableAgent; sessionId: string; cwd: string }> = []) {
+  const companions = await Promise.allSettled([
+    ...runtimes.map(id => readRuntimeHandoff(id)),
+    ...parked.map(item => readHandoffSession({ ...item, home: HOME })),
+  ])
+  const candidates = [source, ...companions.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])]
+  const sources = candidates.filter(item => ['claude', 'codex'].includes(item.agent) && typeof item.sessionId === 'string')
+  try {
+    const notes = await findSessionNotes({ home: HOME, sources })
+    const notice = notes.status === 'unavailable' || notes.status === 'partial'
+      ? '\n[Obsidian保存ノートの一部または全部を確認できませんでした。アクセス権・検索上限・保存先を確認してください。]' : ''
+    return { ...source, text: source.text + (notes.text ? '\n\nObsidian保存ノート（補助資料。最新の会話を優先）\n' + notes.text : '') + notice }
+  } catch {
+    return { ...source, text: source.text + '\n\n[Obsidian保存ノートを確認できませんでした。会話本文のみ引き継ぎます。]' }
+  }
+}
+
+const switchController = new AgentSwitchController({
+  read: readRuntimeHandoff,
+  enrichSource: enrichHandoffSource,
+  preflight: preflightHandoff,
+  status: (id: string) => {
+    const runtime = handoffRuntimes.get(id)
+    const info = tabInfo.get(id)
+    const agent = runtime?.agent ?? (info?.hadClaude ? 'claude' : 'codex')
+    let processStarted = false
+    try { processStarted = path.basename(ptyProcesses.get(id)?.process || '').toLowerCase().includes(agent) } catch { /* process may be exiting */ }
+    return { started: !!runtime?.transcriptSeen || processStarted }
+  },
+  recordMetric: recordHandoffMetric,
+  token: () => randomUUID(),
+  prompt: (source: any, token: string) => buildHandoffPrompt({ source, token })
+    // Control characters are never forwarded through a terminal paste.
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ''),
+  create: (agent: ResumableAgent, cwd: string, prompt: string, token: string) => {
+    // zsh/bash are the shell dialects supported by the quoted launch wrapper.
+    if (!['zsh', 'bash'].includes(path.basename(process.env.SHELL || 'zsh'))) throw new Error('試作版の切り替えはzsh/bashに対応しています。')
+    const { id } = spawnPty(cwd, { agent, prompt, token, sessionId: agent === 'claude' ? randomUUID() : null })
+    return id
+  },
+  send: async (id: string, prompt: string) => {
+    const check = await readRuntimeHandoff(id)
+    const proc = ptyProcesses.get(id)
+    if (!check.ready || !proc) throw new Error('復帰先の会話が入力待ちではありません。')
+    tabResumeCooldown.set(id, Number.POSITIVE_INFINITY)
+    // This is a user-requested context-receipt turn, not SEND message delivery.
+    // No timer guesses about CLI startup: only a verified completed turn reaches here.
+    // Keep the user's receipt request outside the CLI's untrusted pasted-content
+    // envelope. Only the transcript is pasted; no transcript text is typed as a
+    // terminal command or interpreted as a new user instruction.
+    const boundary = prompt.indexOf('\n\n')
+    if (boundary < 0) throw new Error('引き継ぎ形式を確認できません。')
+    if (check.agent === 'claude') proc.write(prompt.slice(0, boundary) + ' ' + '\x1b[200~' + prompt.slice(boundary + 2) + '\x1b[201~\r')
+    // Codex's fast-paste handling can drop preceding typed text. It does not
+    // wrap the full paste as an untrusted directive, so keep its message whole.
+    else proc.write('\x1b[200~' + prompt + '\x1b[201~\r')
+    tabLastInputAt.set(id, Date.now())
+  },
+  activate: (logicalId: string, runtimeId: string) => {
+    const original = tabInfo.get(logicalId)
+    const current = tabInfo.get(runtimeId)
+    if (original && current) current.issue = original.issue
+    for (const message of agentMsgQueue) {
+      if (switchController.owner(message.toTabId) === logicalId) message.toTabId = runtimeId
+    }
+    const renderToken = randomUUID()
+    handoffRenderWait.set(logicalId, { token: renderToken, activatedAt: Date.now() })
+    mainWindow?.webContents.send('terminal:reset', logicalId, handoffScreens.get(runtimeId) || '', renderToken)
+    saveSession()
+  },
+  exited: (id: string) => !ptyProcesses.has(id) || handoffRuntimes.get(id)?.exited === true,
+  release: releaseHandoffRuntime,
+  restoreParked: async (_logicalId: string, descriptor: { agent: ResumableAgent; sessionId: string; cwd: string; claudeResumeParentId?: string | null }, prompt: string, token: string) => {
+    if (!isCodexUuid(descriptor.sessionId)) return { errorCode: 'parked_session_unavailable', reason: '保存された待機会話IDが無効です。' }
+    const verified = await readHandoffSession({ agent: descriptor.agent, sessionId: descriptor.sessionId, cwd: descriptor.cwd, home: HOME })
+    if (!verified.ready) return { errorCode: 'parked_session_unavailable', reason: '保存された待機会話が見つからないか、完了状態ではありません。' }
+    await preflightHandoff(descriptor.agent, descriptor.cwd)
+    const { id } = spawnPty(descriptor.cwd, { agent: descriptor.agent, prompt, token, sessionId: descriptor.agent === 'claude' ? descriptor.sessionId : null, resumeSessionId: descriptor.sessionId })
+    const info = tabInfo.get(id)!; info.claudeResumeParentId = descriptor.claudeResumeParentId ?? (descriptor.agent === 'claude' ? descriptor.sessionId : null)
+    return { runtime: id }
+  },
+})
+
+
+function draftDestinationToken(tabId: string) {
+  return `${switchController.active(tabId)}:${switchController.groups.get(tabId)?.lastAttempt?.startedAt ?? 0}:${tabLastInputAt.get(switchController.active(tabId)) ?? 0}`
+}
+async function draftDestination(tabId: string) {
+  const runtime = switchController.active(tabId)
+  if (!tabOrder.includes(tabId)) return { ready: false, agent: null, token: '', reason: 'タブが見つかりません。' }
+  const observedToken = draftDestinationToken(tabId)
+  const result = await readRuntimeHandoff(runtime)
+  return { ready: observedToken === draftDestinationToken(tabId) && result.ready && !switchController.blocked(runtime) && runtime === switchController.active(tabId), agent: result.agent,
+    token: draftDestinationToken(tabId), reason: result.reason }
+}
+const handoffDrafts = new HandoffDrafts({
+  destination: draftDestination,
+  write: (tabId: string, destination: string, text: string, submit: boolean) => {
+    const runtime = switchController.active(tabId), proc = ptyProcesses.get(runtime)
+    let foreground = ''
+    try { foreground = path.basename(proc?.process || '').toLowerCase() } catch { /* exited */ }
+    if (!tabOrder.includes(tabId) || !proc || !foreground || SHELLS.has(foreground) || !isAgentTab(tabInfo.get(runtime)) || switchController.blocked(runtime) || destination !== draftDestinationToken(tabId)
+      || tabInputUncertain.get(runtime) || tabInputBuf.get(runtime)?.trim() || handoffRuntimes.get(runtime)?.exited) throw new Error('送信先が入力待ちではありません。下書きは保持しています。')
+    tabResumeCooldown.set(runtime, Number.POSITIVE_INFINITY)
+    proc.write('\x1b[200~' + text + '\x1b[201~' + (submit ? '\r' : ''))
+    if (submit) tabLastInputAt.set(runtime, Date.now())
+    else trackDraftInput(runtime, text)
+  },
+})
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -1730,6 +2080,96 @@ function createWindow() {
   // Register IPC handlers only once (guard against createWindow being called multiple times)
   if (!ipcHandlersRegistered) {
     ipcHandlersRegistered = true
+
+  ipcMain.handle('terminal:handoff-draft', (_event, tabId: string) => handoffDrafts.get(tabId))
+  ipcMain.handle('terminal:set-handoff-draft', (_event, tabId: string, text: string) => {
+    if (!tabOrder.includes(tabId)) throw new Error('タブが見つかりません。')
+    return handoffDrafts.set(tabId, text)
+  })
+  ipcMain.handle('terminal:handoff-draft-destination', (_event, tabId: string) => draftDestination(tabId))
+  ipcMain.handle('terminal:submit-handoff-draft', (_event, tabId: string, revision: number, destination: string, submit = true) => handoffDrafts.submit(tabId, revision, destination, submit))
+  ipcMain.handle('terminal:agent-switch-state', (_event, tabId: string) => switchController.state(tabId))
+  ipcMain.handle('terminal:agent-switch-context', (_event, tabId: string) => switchController.preview(tabId))
+  ipcMain.handle('terminal:switch-agent', async (_event, tabId: string, target: ResumableAgent) => {
+    if (!tabOrder.includes(tabId)) return { ok: false, error: 'タブが見つかりません。' }
+    if (handoffDrafts.busy(tabId)) return { ok: false, error: '下書きを送信中です。' }
+    try { return await switchController.switch(tabId, target) }
+    catch { return { ok: false, error: '引き継ぎ情報を読み取れませんでした。元の作業を維持しています。' } }
+  })
+  ipcMain.handle('terminal:cancel-agent-switch', (_event, tabId: string) => switchController.cancel(tabId))
+  ipcMain.handle('terminal:restore-handoff-session', async (_event, tabId: string, lineage: SavedTab['handoff']) => {
+    if (!tabOrder.includes(tabId)) return { ok: false, errorCode: 'saved_session_unavailable', reason: '復元先のタブが見つかりません。' }
+    const priorInfo = tabInfo.get(tabId)
+    if (!priorInfo || isAgentTab(priorInfo) || switchController.groups.get(tabId)?.pending || tabLastInputAt.has(tabId) || tabInputBuf.get(tabId)?.trim()) return { ok: false, errorCode: 'saved_session_unavailable', reason: '復元先の端末は既に使われています。' }
+    const restoreGroup = switchController.group(tabId)
+    ;(restoreGroup as any).committedLineage = lineage && JSON.stringify(lineage).length <= 1500000 ? lineage : { active: { agent: 'invalid', sessionId: 'invalid', cwd: priorInfo.cwd }, parked: [], history: [], context: { invalid: true } }
+    const fail = (errorCode: string, reason: string) => { restoreGroup.errorCode = errorCode; restoreGroup.error = reason; return { ok: false, errorCode, reason } }
+
+    if (!tabOrder.includes(tabId) || !lineage?.active || !['claude', 'codex'].includes(lineage.active.agent) || !isCodexUuid(lineage.active.sessionId) || typeof lineage.active.cwd !== 'string' || lineage.active.cwd !== priorInfo.cwd) return fail('saved_session_unavailable', '保存された引き継ぎ情報が無効です。')
+    // Keep exact linkage on failure too; a subsequent save must never degrade
+    // a missing conversation into the legacy most-recent-session fallback.
+    ;(restoreGroup as any).committedLineage = JSON.stringify(lineage).length <= 1500000 ? lineage : { active: lineage.active, parked: [], history: [], context: { invalid: true } }
+    const verified = await readHandoffSession({ agent: lineage.active.agent, sessionId: lineage.active.sessionId, cwd: lineage.active.cwd, home: HOME })
+    if (!verified.ready) return fail('saved_session_unavailable', '保存された会話が見つからないか、完了状態ではありません。')
+    try { await preflightHandoff(lineage.active.agent, lineage.active.cwd) }
+    catch (error) { return fail('saved_session_unavailable', error instanceof Error ? error.message : '復元先のCLIを起動できません。') }
+    if (Array.isArray(lineage.parked) && lineage.parked.some(item => !item || item.agent === lineage.active!.agent || item.cwd !== lineage.active!.cwd)) return fail('saved_session_unavailable', '保存された待機会話の関連付けが無効です。')
+    const info = tabInfo.get(tabId); const proc = ptyProcesses.get(tabId)
+    if (!info || !proc || isAgentTab(info) || switchController.groups.get(tabId)?.pending || tabLastInputAt.has(tabId) || tabInputBuf.get(tabId)?.trim()) return fail('saved_session_unavailable', '復元先の端末を安全に置き換えられません。')
+    if (!switchController.restoreLineage(tabId, lineage)) return fail('saved_context_unavailable', '保存された引き継ぎコンテキストが破損しているため復元を中止しました。')
+    const group = switchController.groups.get(tabId)!
+    const source = await enrichHandoffSource({ ...verified, text: group.context.merge(verified).text }, [], [...group.parked.values()])
+    if (!tabOrder.includes(tabId) || tabInfo.get(tabId) !== info || ptyProcesses.get(tabId) !== proc || isAgentTab(info) || group.pending || tabLastInputAt.has(tabId) || tabInputBuf.get(tabId)?.trim()) return fail('saved_session_unavailable', 'ノート確認中に端末が使われたため、復元を中止しました。')
+    const token = randomUUID()
+    const prompt = buildHandoffPrompt({ source, token }).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
+    // The initial blank shell has not received user input. Replace it under the
+    // same public ID, so stale shell output cannot race a persisted transcript.
+    releaseHandoffRuntime(tabId)
+    spawnPty(lineage.active.cwd, { agent: lineage.active.agent, prompt, token,
+      sessionId: lineage.active.agent === 'claude' ? lineage.active.sessionId : null,
+      resumeSessionId: lineage.active.sessionId }, tabId)
+    const resumedInfo = tabInfo.get(tabId)!
+    resumedInfo.issue = info.issue
+    resumedInfo.launchModel = info.launchModel
+    ;(group as any).committedLineage = lineage
+    group.error = ''; group.errorCode = null
+    return { ok: true, pending: true }
+  })
+  ipcMain.handle('terminal:agent-switch-recovery', (_event, tabId: string) => {
+    const id = recoveryRuntime(tabId)
+    if (!id) return null
+    const runtime = handoffRuntimes.get(id)
+    const info = tabInfo.get(id)
+    return { agent: runtime?.agent ?? (info?.hadClaude ? 'claude' : 'codex'),
+      exited: !ptyProcesses.has(id) || runtime?.exited === true, output: handoffScreens.get(id) || '' }
+  })
+  ipcMain.handle('terminal:agent-switch-recovery-input', (_event, tabId: string, data: string) => {
+    const id = recoveryRuntime(tabId)
+    if (!id || typeof data !== 'string' || data.length > 65536 || handoffRuntimes.get(id)?.exited) return false
+    const proc = ptyProcesses.get(id)
+    if (!proc) return false
+    // Explicit setup interaction only; ordinary SEND/input routing stays blocked.
+    trackDraftInput(id, data)
+    if (data.includes('\r')) tabLastInputAt.set(id, Date.now())
+    proc.write(data)
+    return true
+  })
+  ipcMain.handle('terminal:agent-switch-recovery-resize', (_event, tabId: string, cols: number, rows: number) => {
+    const id = recoveryRuntime(tabId)
+    if (!id || !Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1 || cols > 500 || rows > 300) return false
+    const proc = ptyProcesses.get(id)
+    if (!proc) return false
+    try { proc.resize(cols, rows); return true } catch { return false }
+  })
+  ipcMain.handle('terminal:agent-switch-metrics', () => { loadHandoffMetrics(); return handoffMetrics })
+  ipcMain.on('terminal:agent-switch-rendered', (_event, tabId: string, token: string) => {
+    const pending = handoffRenderWait.get(tabId)
+    if (!pending || pending.token !== token || pending.rendererMs !== undefined) return
+    pending.rendererMs = Math.max(0, Date.now() - pending.activatedAt)
+    if (pending.metric) { pending.metric.durations.rendererMs = pending.rendererMs; saveHandoffMetrics() }
+  })
+
+
 
   // Create a new terminal tab (optional cwd)
   // pendingSessionId pre-marks a Resume-created tab with its agent/session so
@@ -1753,6 +2193,7 @@ function createWindow() {
 
   // Get title for a tab (poll from renderer)
   ipcMain.handle('terminal:get-title', (_event, tabId: string) => {
+    tabId = switchController.active(tabId)
     const info = tabInfo.get(tabId)
     if (!info) return { issue: '', detail: 'Terminal', model: null, activeAgents: [], agentStatus: 'none' as TabAgentStatus, promptChoices: [] as PromptChoice[] }
     const agentStatus = computeTabAgentStatus(tabId) // also prunes expired done entries
@@ -1784,6 +2225,9 @@ function createWindow() {
 
   // Set issue from renderer (manual rename)
   ipcMain.handle('terminal:set-issue', (_event, tabId: string, issue: string, persistSessionTitle = false) => {
+    const group = switchController.groups.get(tabId)
+    if (group) for (const member of group.members) { const memberInfo = tabInfo.get(member); if (memberInfo) memberInfo.issue = issue }
+    tabId = switchController.active(tabId)
     const info = tabInfo.get(tabId)
     if (info) {
       info.issue = issue
@@ -1804,7 +2248,8 @@ function createWindow() {
   ipcMain.handle('terminal:list-info', () => {
     const now = Date.now()
     return [...tabOrder]
-      .map((id) => {
+      .map((logicalId) => {
+        const id = switchController.active(logicalId)
         const info = tabInfo.get(id)
         const lastOutputAt = tabLastOutputAt.get(id) ?? 0
         const lastInputAt = tabLastInputAt.get(id) ?? 0
@@ -1848,7 +2293,7 @@ function createWindow() {
 
         if (!info) return { id, cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null, lastOutput: '', active, lastInputAt, isThinking: false, isResuming: false, model: null, activeAgents: [], agentStatus: 'none' as TabAgentStatus, promptChoices: [] as PromptChoice[] }
         return {
-          id,
+          id: logicalId,
           cwd: info.cwd,
           proc: info.proc,
           issue: info.issue,
@@ -1870,6 +2315,8 @@ function createWindow() {
 
   // Load saved session — clears all existing PTY state first to prevent tab accumulation on HMR reloads
   ipcMain.handle('session:load', () => {
+    handoffDrafts.clear()
+    switchController.clear()
     // Kill and clear all existing terminals before restoring
     for (const timer of tabTimers.values()) clearInterval(timer)
     tabTimers.clear()
@@ -1879,6 +2326,7 @@ function createWindow() {
     ptyProcesses.clear()
     tabInfo.clear()
     tabInputBuf.clear()
+    tabInputUncertain.clear()
     tabLastOutput.clear()
     tabLastOutputAt.clear()
     tabLastInputAt.clear()
@@ -1897,7 +2345,7 @@ function createWindow() {
     for (const w of tabCodexSessionWatchers.values()) clearInterval(w)
     tabCodexSessionWatchers.clear()
     tabOrder.length = 0
-    tabCounter = 0
+    // Keep runtime IDs monotonic: cancelled async handoffs may still unwind.
     closedTabsHistory.length = 0
 
     return loadSession()
@@ -1906,7 +2354,7 @@ function createWindow() {
   // Close a terminal tab
   ipcMain.on('terminal:close', (_event: Electron.IpcMainEvent, tabId: string) => {
     // Save to closed history if had an agent session
-    const closingInfo = tabInfo.get(tabId)
+    const closingInfo = tabInfo.get(switchController.active(tabId))
     if (closingInfo?.hadClaude) {
       const sessionId = closingInfo.claudeSessionId || closingInfo.claudeResumeParentId
       if (sessionId && sessionHasConversation(sessionId, closingInfo.cwd || HOME)) {
@@ -1941,10 +2389,13 @@ function createWindow() {
       if (closedTabsHistory.length > 10) closedTabsHistory.pop()
     }
 
+    handoffDrafts.close(tabId)
+    switchController.close(tabId)
     const timer = tabTimers.get(tabId)
     if (timer) { clearInterval(timer); tabTimers.delete(tabId) }
     tabInfo.delete(tabId)
     tabInputBuf.delete(tabId)
+    tabInputUncertain.delete(tabId)
     tabLastOutput.delete(tabId)
     tabLastOutputAt.delete(tabId)
     tabLastInputAt.delete(tabId)
@@ -1976,6 +2427,7 @@ function createWindow() {
 
   // Whether a tab has an active claude session (used for close confirmation)
   ipcMain.handle('terminal:get-tab-has-claude', (_event, tabId: string) => {
+    tabId = switchController.active(tabId)
     const info = tabInfo.get(tabId)
     return !!(info?.hadClaude || info?.hadGemini || info?.hadCodex)
   })
@@ -1992,7 +2444,13 @@ function createWindow() {
   })
 
   // Relay renderer input → pty, and capture prompts / detect claude launch
-  ipcMain.on('terminal:input', (_event: Electron.IpcMainEvent, tabId: string, data: string) => {
+  ipcMain.on('terminal:input', (_event: Electron.IpcMainEvent, tabId: string, data: string, requireUnswitched = false) => {
+    // Legacy composer's delayed attachment/Enter writes must expire as soon as
+    // this logical tab starts using handoff, even after cancellation or A→B→A.
+    const inputGroup = switchController.groups.get(tabId)
+    if (requireUnswitched && inputGroup && (inputGroup.pending || inputGroup.recovery || inputGroup.lastAttempt || inputGroup.history.length)) return
+    tabId = switchController.active(tabId)
+    if (switchController.blocked(tabId)) return
     const proc = ptyProcesses.get(tabId)
 
     // Strip bracketed-paste markers for parsing only (PTY still receives raw data).
@@ -2009,6 +2467,7 @@ function createWindow() {
       const send = parseUserSendCommand((buffered + batch).trim())
       if (send) {
         tabInputBuf.set(tabId, '')
+        tabInputUncertain.delete(tabId)
         // Chars typed/pasted before Enter were already echoed into the tab's
         // input line — erase them with backspaces (works in shells and agent TUIs)
         if (buffered.length > 0) proc.write('\x7f'.repeat(Array.from(buffered).length))
@@ -2024,6 +2483,19 @@ function createWindow() {
       }
     }
 
+    // Some CLIs create their transcript only after the first prompt. The
+    // startup watcher may have expired while the user was deciding what to ask.
+    // Take the new-file snapshot BEFORE submitting so a delayed first turn is
+    // still bound to this tab instead of falling back to another recent session.
+    const inputInfo = tabInfo.get(tabId)
+    if (proc && isEnter && isAgentTab(inputInfo)) {
+      if (inputInfo?.hadClaude && !inputInfo.claudeSessionId && !inputInfo.claudeResumeParentId && !tabSessionWatchers.has(tabId)) {
+        startSessionWatch(tabId, inputInfo.cwd || HOME)
+      }
+      if (inputInfo?.hadCodex && !inputInfo.codexSessionId && !tabCodexSessionWatchers.has(tabId)) {
+        startCodexSessionWatch(tabId, inputInfo.cwd || HOME)
+      }
+    }
     if (proc) {
       proc.write(data)
     }
@@ -2039,6 +2511,7 @@ function createWindow() {
       const batchCmd = parsed !== '\r' ? parsed.split('\r')[0] : ''
       const input = (buffered + batchCmd).trim()
       tabInputBuf.set(tabId, '')
+      tabInputUncertain.delete(tabId)
 
       if (isShell) {
         // Detect "gemini" command
@@ -2115,23 +2588,15 @@ function createWindow() {
           tabResumeCooldown.delete(tabId)
         }
       }
-    } else if (data === '\x7f' || data === '\b') {
-      const buf = tabInputBuf.get(tabId) || ''
-      tabInputBuf.set(tabId, buf.slice(0, -1))
-    } else if (data === '\x03' || data === '\x04') {
-      tabInputBuf.set(tabId, '')
-    } else if (parsed.length === 1 && parsed.charCodeAt(0) >= 32) {
-      tabInputBuf.set(tabId, (tabInputBuf.get(tabId) || '') + parsed)
-    } else if (parsed.length > 1 && !parsed.startsWith('\x1b')) {
-      // Includes bracketed-paste content (markers stripped above)
-      tabInputBuf.set(tabId, (tabInputBuf.get(tabId) || '') + parsed)
-    }
+    } else trackDraftInput(tabId, data)
   })
 
   // Answer a select prompt via a quick-answer chip: write "<num>\r" to the PTY and
   // record when it was sent, so stale (already-answered) prompt chips are suppressed
   // until new output arrives (see isPromptChoicesStale)
   ipcMain.handle('terminal:send-choice', (_event, tabId: string, num: string) => {
+    tabId = switchController.active(tabId)
+    if (switchController.blocked(tabId)) return
     const proc = ptyProcesses.get(tabId)
     if (!proc) return
     proc.write(num + '\r')
@@ -2144,6 +2609,7 @@ function createWindow() {
 
   // Handle resize (with tabId)
   ipcMain.on('terminal:resize', (_event: Electron.IpcMainEvent, tabId: string, cols: number, rows: number) => {
+    tabId = switchController.active(tabId)
     const proc = ptyProcesses.get(tabId)
     if (proc) {
       try {
@@ -2173,6 +2639,7 @@ function createWindow() {
   // Returns a structured result ({ ok, ... }) instead of rejecting so the renderer
   // gets clean error messages (ipcMain.handle rejections are wrapped by Electron).
   ipcMain.handle('terminal:create-worktree', async (_event, tabId: string, branchName?: string) => {
+    tabId = switchController.active(tabId)
     const cwd = tabInfo.get(tabId)?.cwd || HOME
     const git = (args: string[], opts: { cwd: string; timeout: number }) =>
       new Promise<string>((resolve, reject) => {
@@ -2431,11 +2898,13 @@ function createWindow() {
   mainWindow.on('closed', () => {
     // Save session before cleanup
     saveSession()
+    switchController.clear()
 
     for (const timer of tabTimers.values()) clearInterval(timer)
     tabTimers.clear()
     tabInfo.clear()
     tabInputBuf.clear()
+    tabInputUncertain.clear()
     tabOrder.length = 0
     for (const proc of ptyProcesses.values()) proc.kill()
     ptyProcesses.clear()
