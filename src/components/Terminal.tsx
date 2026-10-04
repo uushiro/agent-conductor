@@ -170,8 +170,16 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
     const removeResetListener = window.electronAPI.onTerminalReset((incomingTabId, data) => {
       if (incomingTabId !== tabId) return
       term.reset()
-      if (data) term.write(data)
-      if (visibleRef.current && focusedRef.current) term.focus()
+      const restoreGeometry = () => {
+        // A same-tab handoff replaces the PTY, not the DOM container, so a
+        // ResizeObserver callback is not guaranteed. The new CLI starts at
+        // 80x24 and must receive the existing pane's actual dimensions.
+        fitAddon.fit()
+        window.electronAPI.resizeTerminal(tabId, term.cols, term.rows)
+        if (visibleRef.current && focusedRef.current) term.focus()
+      }
+      if (data) term.write(data, restoreGeometry)
+      else restoreGeometry()
     })
 
     // Handle resize

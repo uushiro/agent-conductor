@@ -98,3 +98,19 @@ test('cancelled return to an existing session preserves that parked session', as
   assert.equal(f.sessions.has('tab-1'), true)
   assert.equal(f.releases.length, 0)
 })
+
+
+test('completed assistant acknowledgement may include hook explanations but not inline quoted markers', async () => {
+  for (const standalone of [true, false]) {
+    const f = fixture()
+    const create = f.adapter.create
+    f.adapter.create = (...args) => {
+      const id = create(...args)
+      f.sessions.get(id).lastAssistantText = standalone
+        ? `Hook explanation.\n\n${args[2]}\n`
+        : `The prompt says "${args[2]}".`
+      return id
+    }
+    assert.equal((await f.controller.switch('tab-1', 'codex')).ok, standalone)
+  }
+})

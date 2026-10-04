@@ -7,7 +7,8 @@ import { buildHandoffPrompt, readHandoffSession } from './agent-handoff.mjs';
 
 const cwd = '/work/demo';
 const claudeId = '11111111-1111-4111-8111-111111111111';
-const codexId = '22222222-2222-4222-8222-222222222222';
+// Codex 0.160 uses UUIDv7, unlike the UUIDv4 generated for Claude.
+const codexId = '22222222-2222-7222-8222-222222222222';
 async function home() { return mkdtemp(path.join(os.tmpdir(), 'handoff-')); }
 async function jsonl(file, rows) { await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, rows.map(JSON.stringify).join('\n')); }
 

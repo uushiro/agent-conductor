@@ -6,7 +6,7 @@ const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_CHARS = 30_000;
 const MAX_CODEX_DEPTH = 5;
 const MAX_CODEX_FILES = 2_000;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function failed({ agent, sessionId, cwd = '', reason, path: sourcePath = '' }) {
   return { sessionId, agent, cwd, path: sourcePath, fingerprint: '', ready: false, reason, text: '', lastEventAt: 0, lastAssistantText: '' };

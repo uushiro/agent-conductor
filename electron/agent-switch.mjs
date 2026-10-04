@@ -72,8 +72,9 @@ export class AgentSwitchController {
       const deadline = startedAt + this.timeoutMs
       while (!pending.cancelled && Date.now() < deadline) {
         const result = await this.adapter.read(pending.runtime)
-        // A marker in the startup echo/user prompt is never an acknowledgement.
-        if (result.ready && result.lastEventAt >= startedAt && result.lastAssistantText?.trim() === `AC_HANDOFF_READY:${token}`) {
+        // Require a standalone nonce line in the final completed assistant reply.
+        // CLI hooks may add explanatory prose; startup/user echoes never qualify.
+        if (result.ready && result.lastEventAt >= startedAt && result.lastAssistantText?.split(/\r?\n/).some(line => line.trim() === `AC_HANDOFF_READY:${token}`)) {
           if (pending.cancelled) break
           group.history.push({ agent: source.agent, text: source.text })
           group.history = group.history.slice(-6)

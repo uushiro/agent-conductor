@@ -89,6 +89,7 @@ interface ClosedTabEntry {
 }
 const closedTabsHistory: ClosedTabEntry[] = []
 const tabInputBuf = new Map<string, string>()
+const tabInputUncertain = new Map<string, boolean>()
 const tabLastOutput = new Map<string, string>()
 const tabLastOutputAt = new Map<string, number>()
 const tabLastInputAt = new Map<string, number>()
@@ -1502,6 +1503,7 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
       }
       info.latestInput = ''
       tabInputBuf.delete(id)
+      tabInputUncertain.delete(id)
     }
   }
 
@@ -1754,7 +1756,7 @@ function releaseHandoffRuntime(id: string) {
   const proc = ptyProcesses.get(id)
   ptyProcesses.delete(id)
   try { proc?.kill() } catch { /* already exited */ }
-  for (const map of [tabInfo, tabInputBuf, tabLastOutput, tabLastOutputAt, tabLastInputAt,
+  for (const map of [tabInfo, tabInputBuf, tabInputUncertain, tabLastOutput, tabLastOutputAt, tabLastInputAt,
     tabDetectScanBuf, tabModelScanBuf, tabSentAgentMsgKeys, tabAgentMarkerSeen,
     tabAgentOscBuf, tabResumeCooldown, handoffRuntimes, handoffScreens]) map.delete(id)
   for (let i = agentMsgQueue.length - 1; i >= 0; i--) {
@@ -1768,6 +1770,7 @@ async function readRuntimeHandoff(id: string) {
   const agent = runtime?.agent ?? (info?.hadClaude ? 'claude' : info?.hadCodex ? 'codex' : null)
   const unavailable = (reason: string) => ({ agent, ready: false, reason, cwd: info?.cwd || HOME, lastEventAt: 0, lastAssistantText: '', text: '' })
   if (!info || !agent || !isAgentTab(info) || runtime?.exited) return unavailable('ClaudeまたはCodexの会話を開始してください。')
+  if (tabInputUncertain.get(id)) return unavailable('編集中の入力を確認できません。送信するか、Ctrl+Cで入力を取り消してから切り替えてください。')
   if (tabInputBuf.get(id)?.trim()) return unavailable('入力中の文章を送信、または消してから切り替えてください。')
   if (info.activeAgents.some(a => a.status === 'started')) return unavailable('実行中のエージェントの完了を待っています。')
   let sessionId = agent === 'claude' ? info.claudeSessionId || info.claudeResumeParentId : info.codexSessionId
@@ -2016,6 +2019,7 @@ function createWindow() {
     ptyProcesses.clear()
     tabInfo.clear()
     tabInputBuf.clear()
+    tabInputUncertain.clear()
     tabLastOutput.clear()
     tabLastOutputAt.clear()
     tabLastInputAt.clear()
@@ -2083,6 +2087,7 @@ function createWindow() {
     if (timer) { clearInterval(timer); tabTimers.delete(tabId) }
     tabInfo.delete(tabId)
     tabInputBuf.delete(tabId)
+    tabInputUncertain.delete(tabId)
     tabLastOutput.delete(tabId)
     tabLastOutputAt.delete(tabId)
     tabLastInputAt.delete(tabId)
@@ -2150,6 +2155,7 @@ function createWindow() {
       const send = parseUserSendCommand((buffered + batch).trim())
       if (send) {
         tabInputBuf.set(tabId, '')
+        tabInputUncertain.delete(tabId)
         // Chars typed/pasted before Enter were already echoed into the tab's
         // input line — erase them with backspaces (works in shells and agent TUIs)
         if (buffered.length > 0) proc.write('\x7f'.repeat(Array.from(buffered).length))
@@ -2165,6 +2171,19 @@ function createWindow() {
       }
     }
 
+    // Some CLIs create their transcript only after the first prompt. The
+    // startup watcher may have expired while the user was deciding what to ask.
+    // Take the new-file snapshot BEFORE submitting so a delayed first turn is
+    // still bound to this tab instead of falling back to another recent session.
+    const inputInfo = tabInfo.get(tabId)
+    if (proc && isEnter && isAgentTab(inputInfo)) {
+      if (inputInfo?.hadClaude && !inputInfo.claudeSessionId && !inputInfo.claudeResumeParentId && !tabSessionWatchers.has(tabId)) {
+        startSessionWatch(tabId, inputInfo.cwd || HOME)
+      }
+      if (inputInfo?.hadCodex && !inputInfo.codexSessionId && !tabCodexSessionWatchers.has(tabId)) {
+        startCodexSessionWatch(tabId, inputInfo.cwd || HOME)
+      }
+    }
     if (proc) {
       proc.write(data)
     }
@@ -2180,6 +2199,7 @@ function createWindow() {
       const batchCmd = parsed !== '\r' ? parsed.split('\r')[0] : ''
       const input = (buffered + batchCmd).trim()
       tabInputBuf.set(tabId, '')
+      tabInputUncertain.delete(tabId)
 
       if (isShell) {
         // Detect "gemini" command
@@ -2256,16 +2276,21 @@ function createWindow() {
           tabResumeCooldown.delete(tabId)
         }
       }
-    } else if (data === '\x7f' || data === '\b') {
-      const buf = tabInputBuf.get(tabId) || ''
-      tabInputBuf.set(tabId, buf.slice(0, -1))
-    } else if (data === '\x03' || data === '\x04') {
+    } else if (data === '\x03') {
       tabInputBuf.set(tabId, '')
-    } else if (parsed.length === 1 && parsed.charCodeAt(0) >= 32) {
-      tabInputBuf.set(tabId, (tabInputBuf.get(tabId) || '') + parsed)
-    } else if (parsed.length > 1 && !parsed.startsWith('\x1b')) {
-      // Includes bracketed-paste content (markers stripped above)
-      tabInputBuf.set(tabId, (tabInputBuf.get(tabId) || '') + parsed)
+      tabInputUncertain.delete(tabId)
+    } else if (/\x1b(?:\[[0-9;]*[ABCDHF~]|[bfpn])/.test(parsed) || /[\x01\x04\x05\x09\x0e\x10\x12]/.test(parsed)) {
+      // History, completion and cursor editing can change text we cannot read
+      // back from the TUI. Fail closed until submission or explicit cancellation.
+      tabInputUncertain.set(tabId, true)
+    } else if (!parsed.startsWith('\x1b')) {
+      let buffer = Array.from(tabInputBuf.get(tabId) || '')
+      for (const char of parsed) {
+        if (char === '\x7f' || char === '\b') buffer.pop()
+        else if (char === '\x15' && !tabInputUncertain.get(tabId)) buffer = []
+        else if (char.codePointAt(0)! >= 32 || char === '\n') buffer.push(char)
+      }
+      tabInputBuf.set(tabId, buffer.join(''))
     }
   })
 
@@ -2582,6 +2607,7 @@ function createWindow() {
     tabTimers.clear()
     tabInfo.clear()
     tabInputBuf.clear()
+    tabInputUncertain.clear()
     tabOrder.length = 0
     for (const proc of ptyProcesses.values()) proc.kill()
     ptyProcesses.clear()

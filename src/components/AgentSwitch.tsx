@@ -25,10 +25,10 @@ export function AgentSwitch({ tabId, onPreparingChange }: Props) {
   const [showHistory, setShowHistory] = useState(false)
   const mountedRef = useRef(true)
   const requestInFlight = useRef(false)
-  // An IPC rejection is a client-observable failure. Do not let an in-flight
-  // status poll immediately repaint it as “preparing”; retain it until the
-  // user starts another action or changes tabs.
-  const localErrorRef = useRef(false)
+  // Retain client errors while continuing to refresh readiness. Freezing the
+  // entire state after cancellation would leave canSwitch=false permanently.
+  // A still-pending backend handoff remains visible and cancellable.
+  const localErrorRef = useRef<string | null>(null)
   // This changes only when the rendered logical tab changes. Polls and the
   // intentionally long-running switch request must not invalidate each other.
   const tabGenerationRef = useRef(0)
@@ -39,8 +39,10 @@ export function AgentSwitch({ tabId, onPreparingChange }: Props) {
     const generation = tabGenerationRef.current
     try {
       const next = await window.electronAPI.getAgentSwitchState(tabId)
-      if (mountedRef.current && generation === tabGenerationRef.current && !localErrorRef.current) {
-        setState(next)
+      if (mountedRef.current && generation === tabGenerationRef.current) {
+        setState(localErrorRef.current && next.phase !== 'preparing'
+          ? { ...next, phase: 'error', reason: localErrorRef.current }
+          : next)
         setTarget((current) => next.target ?? (current === next.agent ? (next.agent === 'claude' ? 'codex' : 'claude') : current))
         onPreparingChange(tabId, next.phase === 'preparing')
       }
@@ -53,7 +55,7 @@ export function AgentSwitch({ tabId, onPreparingChange }: Props) {
 
   useEffect(() => {
     mountedRef.current = true
-    localErrorRef.current = false
+    localErrorRef.current = null
     setState(initialState)
     setShowHistory(false)
     refresh()
@@ -71,22 +73,22 @@ export function AgentSwitch({ tabId, onPreparingChange }: Props) {
   const switchAgent = async () => {
     if (!state.canSwitch || state.phase === 'preparing') return
     const generation = tabGenerationRef.current
-    localErrorRef.current = false
+    localErrorRef.current = null
     setState((current) => ({ ...current, phase: 'preparing', reason: '' }))
     onPreparingChange(tabId, true)
     try {
       const result = await window.electronAPI.switchAgent(tabId, target)
       if (!mountedRef.current || generation !== tabGenerationRef.current) return
       if (!result.ok) {
-        localErrorRef.current = true
-        setState((current) => ({ ...current, phase: 'error', reason: result.error || '引き継ぎを開始できませんでした' }))
+        localErrorRef.current = result.error || '引き継ぎを開始できませんでした'
+        setState((current) => ({ ...current, phase: 'error', reason: localErrorRef.current! }))
         onPreparingChange(tabId, false)
       }
       refresh()
     } catch {
       if (mountedRef.current && generation === tabGenerationRef.current) {
-        localErrorRef.current = true
-        setState((current) => ({ ...current, phase: 'error', reason: '引き継ぎの通信に失敗しました' }))
+        localErrorRef.current = '引き継ぎの通信に失敗しました'
+        setState((current) => ({ ...current, phase: 'error', reason: localErrorRef.current! }))
         onPreparingChange(tabId, false)
       }
     }
@@ -99,8 +101,8 @@ export function AgentSwitch({ tabId, onPreparingChange }: Props) {
       if (mountedRef.current && generation === tabGenerationRef.current) refresh()
     } catch {
       if (mountedRef.current && generation === tabGenerationRef.current) {
-        localErrorRef.current = true
-        setState((current) => ({ ...current, phase: 'error', reason: 'キャンセルの通信に失敗しました' }))
+        localErrorRef.current = 'キャンセルの通信に失敗しました'
+        setState((current) => ({ ...current, phase: 'error', reason: localErrorRef.current! }))
         onPreparingChange(tabId, false)
       }
     }

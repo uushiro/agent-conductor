@@ -16,7 +16,7 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
   const testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'conductor-ipc-test-'))
   const project = path.join(testHome, 'project')
   fs.mkdirSync(project)
-  const handlers = new Map(), events = new Map(), intervals = new Map(), sent = [], ptys = [], timeouts = new Set()
+  const handlers = new Map(), events = new Map(), intervals = new Map(), sent = [], ptys = [], timeouts = new Set(), longTimeouts = []
   const sourceId = randomUUID()
   const sourcePath = path.join(testHome, '.claude/projects', project.replaceAll('/', '-'), sourceId + '.jsonl')
   const stamp = () => new Date().toISOString()
@@ -44,7 +44,7 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
         kill() { this.killed = true; this.exit?.() },
         write(data) {
           this.writes.push(data)
-          if (data.startsWith('claude ')) this.process = 'claude'
+          if (/^claude(?:\s|$)/.test(data)) this.process = 'claude'
           if (data.includes('\x1b[200~')) {
             const marker = data.match(/AC_HANDOFF_READY:([a-z0-9-]+)/)?.[0]
             if (marker && this === ptys[0]) {
@@ -87,7 +87,7 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
     process: { env: { SHELL: '/bin/zsh' }, platform: process.platform }, Buffer, console,
     setInterval(fn, ms) { const key = {}; intervals.set(key, { fn, ms }); return key },
     clearInterval(key) { intervals.delete(key) },
-    setTimeout(fn, ms) { if (ms >= 1000) return {}; const handle = setTimeout(fn, 2); timeouts.add(handle); return handle },
+    setTimeout(fn, ms) { if (ms >= 1000) { longTimeouts.push({ fn, ms }); return {} }; const handle = setTimeout(fn, 2); timeouts.add(handle); return handle },
     clearTimeout(handle) { clearTimeout(handle); timeouts.delete(handle) },
   }
   try {
@@ -123,6 +123,26 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
     emit('terminal:input', root, 'next question')
     assert.equal(ptys[0].writes.length, before + 1)
     assert.equal((await invoke('terminal:agent-switch-state', root)).canSwitch, false, 'draft is never lost on switch')
+    emit('terminal:input', root, '\x15')
+    assert.equal((await invoke('terminal:agent-switch-state', root)).canSwitch, true, 'Ctrl+U clears an end-of-line draft')
+    emit('terminal:input', root, '未送信テスト')
+    emit('terminal:input', root, '\x7f'.repeat(6))
+    assert.equal((await invoke('terminal:agent-switch-state', root)).canSwitch, true, 'batched backspaces remove characters')
+    emit('terminal:input', root, '\x1b[A')
+    emit('terminal:input', root, '\x15')
+    assert.equal((await invoke('terminal:agent-switch-state', root)).canSwitch, false, 'unknown history/cursor edits cannot bypass draft protection')
+    emit('terminal:input', root, '\x03')
+    assert.equal((await invoke('terminal:agent-switch-state', root)).canSwitch, true)
+    // A new CLI can sit idle beyond the startup watcher's 60s window. Its
+    // first actual user prompt must re-arm transcript discovery before write.
+    const delayed = await invoke('terminal:create', project)
+    emit('terminal:input', delayed, 'claude\r')
+    for (const timer of intervals.values()) if (timer.ms === 1500) timer.fn()
+    for (const timer of longTimeouts) if (timer.ms === 60000) timer.fn()
+    const idleWatchers = [...intervals.values()].filter(timer => timer.ms === 1000).length
+    emit('terminal:input', delayed, 'delayed first prompt\r')
+    assert.equal([...intervals.values()].filter(timer => timer.ms === 1000).length, idleWatchers + 1)
+    emit('terminal:close', delayed)
     emit('terminal:close', root)
     assert.equal(ptys.every(p => p.killed), true)
   } finally {
