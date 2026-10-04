@@ -164,10 +164,9 @@ export function AgentSwitch({ tabId, onPreparingChange }: Props) {
         <option value="claude" disabled={state.agent === 'claude'}>Claude</option><option value="codex" disabled={state.agent === 'codex'}>Codex</option>
       </select></label>
       <button className="agent-switch-submit" type="button" onClick={() => void switchAgent()} disabled={disabled} title={disabled ? state.reason : undefined}>引き継ぐ</button>
-      <span className="agent-switch-experimental">Experimental</span>
       <button className="agent-switch-history-toggle" type="button" onClick={() => setShowHistory((value) => !value)} aria-expanded={showHistory}>引き継ぎ内容</button>
     </div>
-    {(state.phase === 'preparing' || state.reason || successLabel) && <div className="agent-switch-status" aria-live="polite">
+    {(state.phase === 'preparing' || state.phase === 'error' || successLabel) && <div className="agent-switch-status" aria-live="polite">
       {state.phase === 'preparing' && state.progress ? <><span>{stageLabel[state.progress.stage]}（{duration(elapsed)}）</span><button type="button" onClick={() => void cancel()}>キャンセル</button></> : successLabel ? <span className="agent-switch-success">{successLabel}</span> : <span className={state.phase === 'error' ? 'agent-switch-error' : undefined}>{state.reason}</span>}
       {state.phase !== 'preparing' && state.recovery && <button type="button" className="agent-switch-recovery-open" ref={recoveryTriggerRef} onClick={() => setRecoveryOpen(true)}>切り替え先を確認</button>}
     </div>}
