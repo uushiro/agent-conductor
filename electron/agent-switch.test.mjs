@@ -50,9 +50,86 @@ test('startup failure or missing acknowledgement keeps source intact', async () 
   const f = fixture({ stalled: true })
   const result = await f.controller.switch('tab-1', 'codex')
   assert.equal(result.ok, false)
-  assert.deepEqual(f.releases, ['child-1'])
+  assert.deepEqual(f.releases, [])
+  assert.equal(f.controller.recoveryRuntime('tab-1'), 'child-1')
+  assert.deepEqual((await f.controller.state('tab-1')).recovery, { agent: 'codex', exited: false })
   assert.equal(f.controller.active('tab-1'), 'tab-1')
   assert.equal(f.sessions.get('tab-1').text, 'User: original constraints')
+})
+
+test('progress stays starting until adapter observes startup, then records dispatch timing', async () => {
+  const f = fixture()
+  let started = false
+  const create = f.adapter.create
+  f.adapter.create = (...args) => { const id = create(...args); Object.assign(f.sessions.get(id), { text: '', ready: false }); return id }
+  f.adapter.status = async () => ({ started })
+  const running = f.controller.switch('tab-1', 'codex')
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal((await f.controller.state('tab-1')).progress?.stage, 'starting')
+  started = true; f.sessions.get('child-1').ready = true
+  assert.equal((await running).ok, true)
+  const metric = f.controller.metrics().at(-1)
+  assert.equal(metric.outcome, 'success')
+  assert.equal(metric.mode, 'new')
+  assert.ok(metric.durations.totalMs >= metric.durations.readMs)
+  assert.equal(metric.durations.readMs + metric.durations.startMs + metric.durations.waitMs + metric.durations.activateMs, metric.durations.totalMs)
+  assert.equal('cwd' in metric, false)
+})
+
+test('a transcript observation can advance startup when native status is still generic', async () => {
+  const f = fixture()
+  f.adapter.status = async () => ({ started: false })
+  assert.equal((await f.controller.switch('tab-1', 'codex')).ok, true)
+})
+
+test('preflight failure prevents a fresh spawn and reports its code', async () => {
+  const f = fixture()
+  let creates = 0
+  const create = f.adapter.create
+  f.adapter.create = (...args) => { creates += 1; return create(...args) }
+  f.adapter.preflight = async () => { const error = new Error('Codex is unavailable'); error.code = 'missing_cli'; throw error }
+  const result = await f.controller.switch('tab-1', 'codex')
+  assert.equal(result.errorCode, 'missing_cli')
+  assert.equal(creates, 0)
+  assert.equal(f.controller.metrics().at(-1).errorCode, 'missing_cli')
+})
+
+test('cancelling while preflight rejects is classified as cancelled and never spawns', async () => {
+  const f = fixture()
+  let reject
+  f.adapter.preflight = () => new Promise((_, fail) => { reject = fail })
+  const running = f.controller.switch('tab-1', 'codex')
+  await new Promise(resolve => setTimeout(resolve, 1))
+  f.controller.cancel('tab-1')
+  const error = new Error('missing cli'); error.code = 'missing_cli'; reject(error)
+  assert.equal((await running).errorCode, 'cancelled')
+  assert.equal(f.sessions.size, 1)
+})
+
+test('timeout retains a new target and retry reuses it with a fresh nonce', async () => {
+  const f = fixture({ stalled: true })
+  const first = await f.controller.switch('tab-1', 'codex')
+  assert.equal(first.errorCode, 'timeout')
+  assert.equal(f.controller.recoveryRuntime('tab-1'), 'child-1')
+  Object.assign(f.sessions.get('child-1'), { ready: true })
+  const second = await f.controller.switch('tab-1', 'codex')
+  assert.equal(second.ok, true)
+  assert.equal(f.sessions.has('child-2'), false)
+  assert.equal(f.controller.metrics().at(-1).mode, 'reuse')
+})
+
+test('recovery is inaccessible while its retry is pending', async () => {
+  const f = fixture({ stalled: true })
+  await f.controller.switch('tab-1', 'codex')
+  Object.assign(f.sessions.get('child-1'), { ready: true })
+  f.adapter.send = async id => { Object.assign(f.sessions.get(id), { ready: false }) }
+  const retry = f.controller.switch('tab-1', 'codex')
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(f.controller.recoveryRuntime('tab-1'), null)
+  assert.equal((await f.controller.state('tab-1')).recovery, null)
+  f.controller.cancel('tab-1')
+  await retry
+  assert.equal(f.controller.recoveryRuntime('tab-1'), 'child-1')
 })
 
 test('a nonce in a user echo is not a final assistant acknowledgement', async () => {
@@ -72,6 +149,8 @@ test('cancel and duplicate request do not destroy source or activate target', as
   assert.equal(f.controller.blocked('tab-1'), true)
   f.controller.cancel('tab-1')
   assert.equal((await running).ok, false)
+  assert.equal(f.controller.metrics().at(-1).outcome, 'cancelled')
+  assert.deepEqual(f.releases, ['child-1'])
   assert.equal(f.controller.active('tab-1'), 'tab-1')
   assert.equal(f.activations.length, 0)
 })
@@ -84,6 +163,7 @@ test('closing while waiting cancels late completion and releases all runtimes', 
   assert.equal((await running).ok, false)
   assert.equal(f.activations.length, 0)
   assert.equal(f.sessions.size, 0)
+  assert.equal(f.controller.recoveryRuntime('tab-1'), null)
 })
 
 test('cancelled return to an existing session preserves that parked session', async () => {

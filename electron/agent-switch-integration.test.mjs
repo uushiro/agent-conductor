@@ -25,6 +25,8 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
     { type: 'user', sessionId: sourceId, cwd: project, timestamp: stamp(), message: { role: 'user', content: 'Keep the approved scope; do not delete files.' } },
     { type: 'assistant', sessionId: sourceId, cwd: project, timestamp: stamp(), message: { role: 'assistant', content: [{ type: 'text', text: 'First phase done.' }], stop_reason: 'end_turn' } },
   ])
+  let missingCli = false, stallNextSend = false, clockOffset = 0
+  class TestDate extends Date { static now() { return Date.now() + clockOffset } }
   let ready
   const appReady = new Promise(resolve => { ready = resolve })
   const fakeElectron = {
@@ -44,9 +46,17 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
         kill() { this.killed = true; this.exit?.() },
         write(data) {
           this.writes.push(data)
+          if (this.complete && data === 'complete-setup\r') { setTimeout(() => this.complete(this.pendingPrompt), 5); return }
           if (/^claude(?:\s|$)/.test(data)) this.process = 'claude'
           if (data.includes('\x1b[200~')) {
             const marker = data.match(/AC_HANDOFF_READY:([a-z0-9-]+)/)?.[0]
+            if (marker && this.complete) {
+              if (stallNextSend) {
+                stallNextSend = false; this.pendingPrompt = data
+                append(this.rollout, [{ type: 'response_item', timestamp: stamp(), payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: data }] } }])
+                setTimeout(() => { clockOffset = 61000; this.data?.('Workspace trust confirmation required\r\n') }, 5)
+              } else setTimeout(() => this.complete(data), 5)
+            }
             if (marker && this === ptys[0]) {
               setTimeout(() => append(sourcePath, [
                 { type: 'user', timestamp: stamp(), message: { role: 'user', content: data } },
@@ -62,15 +72,17 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
         const id = randomUUID(), date = new Date()
         const rollout = path.join(testHome, '.codex/sessions', String(date.getFullYear()), String(date.getMonth()+1).padStart(2, '0'), String(date.getDate()).padStart(2, '0'), `rollout-test-${id}.jsonl`)
         const prompt = options.env.AC_HANDOFF_PROMPT
-        setTimeout(() => {
+        proc.rollout = rollout
+        proc.complete = (receivedPrompt) => {
           append(rollout, [
             { type: 'session_meta', timestamp: stamp(), payload: { id, cwd: project, source: 'cli', originator: 'codex_cli_rs' } },
-            { type: 'response_item', timestamp: stamp(), payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] } },
-            { type: 'response_item', timestamp: stamp(), payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: prompt.match(/AC_HANDOFF_READY:[a-z0-9-]+/)[0] }] } },
+            { type: 'response_item', timestamp: stamp(), payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: receivedPrompt }] } },
+            { type: 'response_item', timestamp: stamp(), payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: receivedPrompt.match(/AC_HANDOFF_READY:[a-z0-9-]+/)[0] }] } },
             { type: 'event_msg', timestamp: stamp(), payload: { type: 'task_complete' } },
           ])
           proc.data?.('Codex ready\r\n')
-        }, 5)
+        }
+        setTimeout(() => proc.complete(prompt), 5)
       }
       return proc
     },
@@ -79,11 +91,16 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
     if (name === 'electron') return fakeElectron
     if (name === 'node-pty') return fakePty
     if (name === 'node:os') return { ...os, homedir: () => testHome }
+    if (name === 'node:child_process') return { execFile(command, args, options, callback) {
+      assert.equal(args[1], 'command -v "$1" >/dev/null', 'tests must never execute a real child process')
+      setTimeout(() => callback(missingCli ? Object.assign(new Error('not found'), { code: 1 }) : null, '', ''), 1)
+    } }
     if (name === 'node:https') return { get() { throw new Error('Network forbidden in test') } }
     return require(name)
   }
   const context = {
     require: fakeRequire, exports: {}, module: { exports: {} }, __dirname: path.join(testHome, 'bundle'),
+    Date: TestDate,
     process: { env: { SHELL: '/bin/zsh' }, platform: process.platform }, Buffer, console,
     setInterval(fn, ms) { const key = {}; intervals.set(key, { fn, ms }); return key },
     clearInterval(key) { intervals.delete(key) },
@@ -100,6 +117,12 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
     for (const timer of intervals.values()) if (timer.ms === 1500) timer.fn()
     await invoke('terminal:set-issue', root, 'My task')
     assert.equal((await invoke('terminal:agent-switch-state', root)).canSwitch, true)
+    missingCli = true
+    const missing = await invoke('terminal:switch-agent', root, 'codex')
+    assert.equal(missing.errorCode, 'cli_missing')
+    assert.equal(ptys.length, 1, 'missing CLI never starts another PTY')
+    assert.equal((await invoke('terminal:agent-switch-state', root)).canSwitch, true)
+    missingCli = false
     const watchdog = setTimeout(() => invoke('terminal:cancel-agent-switch', root), 2500)
     const switched = await invoke('terminal:switch-agent', root, 'codex')
     clearTimeout(watchdog)
@@ -108,6 +131,15 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
     assert.equal((await invoke('terminal:list-info')).length, 1)
     assert.equal((await invoke('terminal:list-info'))[0].id, root)
     assert.equal(sent.filter(e => e[0] === 'terminal:reset')[0][1], root)
+    const reset = sent.find(e => e[0] === 'terminal:reset')
+    emit('terminal:agent-switch-rendered', root, 'stale-token')
+    assert.equal((await invoke('terminal:agent-switch-metrics')).at(-1).durations.rendererMs, undefined)
+    emit('terminal:agent-switch-rendered', root, reset[3])
+    const metrics = await invoke('terminal:agent-switch-metrics')
+    assert.equal(metrics.length, 2)
+    assert.ok(metrics.at(-1).durations.rendererMs >= 0)
+    assert.doesNotMatch(JSON.stringify(metrics), /Keep the approved|project|tab-1|AC_HANDOFF_READY/)
+    assert.ok(fs.existsSync(path.join(testHome, 'handoff-metrics.json')))
     const saved = JSON.parse(fs.readFileSync(path.join(testHome, 'session.json'), 'utf8'))
     assert.equal(saved.tabs.length, 1)
     assert.equal(saved.tabs[0].hadCodex, true)
@@ -133,6 +165,27 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
     assert.equal((await invoke('terminal:agent-switch-state', root)).canSwitch, false, 'unknown history/cursor edits cannot bypass draft protection')
     emit('terminal:input', root, '\x03')
     assert.equal((await invoke('terminal:agent-switch-state', root)).canSwitch, true)
+    stallNextSend = true
+    const failedReturn = await invoke('terminal:switch-agent', root, 'codex')
+    clockOffset = 0
+    assert.equal(failedReturn.errorCode, 'timeout')
+    const recovery = await invoke('terminal:agent-switch-recovery', root)
+    assert.equal(recovery.agent, 'codex')
+    assert.match(recovery.output, /Workspace trust/)
+    assert.equal(ptys[1].killed, false)
+    assert.equal(await invoke('terminal:agent-switch-recovery-input', 'wrong-tab', 'x'), false)
+    assert.equal(await invoke('terminal:agent-switch-recovery-input', root, 'complete-setup\r'), true)
+    await new Promise(resolve => setTimeout(resolve, 15))
+    await invoke('terminal:agent-switch-recovery-input', root, 'unsent setup draft')
+    assert.equal((await invoke('terminal:switch-agent', root, 'codex')).errorCode, 'setup_not_ready', 'recovery draft cannot be overwritten by retry')
+    await invoke('terminal:agent-switch-recovery-input', root, '\x15')
+    // xterm control replies must not invalidate an already-completed turn.
+    await invoke('terminal:agent-switch-recovery-input', root, '\x1b[0n')
+    const retry = invoke('terminal:switch-agent', root, 'codex')
+    assert.equal(await invoke('terminal:agent-switch-recovery-input', root, 'must not reach pending target'), false)
+    assert.equal((await retry).ok, true)
+    assert.equal(ptys.length, 2, 'retry reuses target rather than duplicating it')
+    assert.equal(await invoke('terminal:agent-switch-recovery', root), null)
     // A new CLI can sit idle beyond the startup watcher's 60s window. Its
     // first actual user prompt must re-arm transcript discovery before write.
     const delayed = await invoke('terminal:create', project)

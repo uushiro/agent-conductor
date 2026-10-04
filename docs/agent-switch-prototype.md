@@ -48,7 +48,9 @@ tab ID stays the same. Run this checklist manually before relying on the feature
 - Experimental Claude ↔ Codex handoff only; no within-provider model selector.
 - Uses existing CLI authentication and permission settings. Both CLIs must be
   installed, authenticated, and trusted for the working directory before use.
-  Interactive first-run prompts in a hidden target cause a recoverable timeout.
+  A timeout retains the target; “切り替え先を確認” opens a separate terminal for
+  manual login/trust interaction. Retrying reuses that target after its conversation
+  is ready. The source remains available throughout failure recovery.
 - Source readiness requires a matching session transcript, an explicit completed
   turn, no draft input, and no known running worker. Silence alone is insufficient.
   This does not inspect arbitrary background shell jobs or external processes.
@@ -64,6 +66,8 @@ tab ID stays the same. Run this checklist manually before relying on the feature
   CLI startup/context echo may remain visible in terminal scrollback.
 - The source is retained until the target acknowledges reception. Cancellation
   discards a newly launched target; an existing parked session is preserved.
+  Failure retains at most one recovery target rather than silently discarding its
+  setup/error screen. Recovery input is rejected during a pending retry.
 - No automatic task continuation, queued busy switching, or drafting during
   handoff yet. Existing terminal input is blocked only during preparation.
 - Tab ID, position, name and working directory remain stable. Six recent text
@@ -126,3 +130,63 @@ model toggle. A target model turn still takes seconds; terminal scrollback can
 show the handoff prompt/nonce and CLI hook explanations. Authentication failures,
 first-run dialogs, split-pane focus, and long/repeated handoff quality still need
 native checks before promoting the feature from experimental use.
+
+
+## P0: observable progress and recovery
+
+The toolbar reports reading, starting and waiting based on controller operations,
+observed native process/transcript startup and the completed receipt. Elapsed time
+is shown alongside cancellation, without a guessed percentage or ETA. Completed
+handoffs name the active agent. Current draft/busy reasons take precedence over
+an older success message.
+
+A login-shell executable check distinguishes a missing CLI from a generic launch
+check failure before another PTY is created. Known invalid transcript formats,
+identity/size failures, target exit and receipt timeout have separate error codes.
+A timeout does not assert that authentication is the cause. The retained target's
+actual terminal can be opened to inspect and interact with its setup/error state.
+Closing this dialog returns to the source; retry sends the latest source context
+with a fresh nonce into the same ready target. No setup acceptance is automated.
+
+The last 100 attempts are kept in `handoff-metrics.json` in the app's user-data
+directory. Fields are only agents, new/reuse mode, outcome/error code, start time
+and durations; no prompts, transcript text, session IDs or working paths are
+recorded. Measurements include read, startup, receipt wait, activation dispatch,
+and a separately acknowledged `rendererMs`. That final measurement ends after
+xterm output/geometry/focus have been applied AND input is enabled. It is absent
+until acknowledged; switching away from the pane can extend it by user wait time.
+Stage times are observed boundaries (backend polling), not provider-side latency.
+
+Automated coverage includes missing CLI without spawn, retained-target recovery,
+retries without duplicate PTYs, recovery-input rejection during retry, stale
+render-token rejection, cancellation races, and content-free persisted metrics.
+Native measurements (2026-10-04, synthetic conversation, actual toolbar actions):
+
+| Direction | Samples | Mode | Success / failure | Total p50 / p95 | Renderer p50 / p95 |
+| --- | ---: | --- | --- | --- | --- |
+| Claude → Codex | 10 | 1 new, 9 reuse | 10 / 0 | 5.232s / 10.790s | 15ms / 42ms |
+| Codex → Claude | 10 | 10 reuse | 10 / 0 | 6.763s / 10.844s | 13ms / 21ms |
+
+Percentiles use empirical nearest rank; these small samples are not a production
+latency guarantee. Eight earlier attempts exposed a single-pane focus bug and
+were excluded. The fixed build restores focus and measured input-ready rendering
+in every sample (7–42ms). There is no fresh-Claude sample in this benchmark.
+An intentional cancellation after 1.2s is recorded separately: the source remained
+active, input was re-enabled and the terminal textarea regained focus. A subsequent
+no-hint recall still returned the latest four synthetic conditions correctly.
+
+The source of most elapsed time is receipt waiting, not UI activation. Skipping
+the receipt check solely to appear faster would weaken the handoff guarantee;
+next work should reduce repeated context and improve what the user sees while
+waiting. The initial native focus issue was fixed in the single-pane focus prop,
+not by reporting a fabricated zero renderer duration.
+
+
+A separate native Electron + node-pty fixture exercised a simulated first-run gate:
+receipt timeout kept the source and target alive; the user opened the recovery
+terminal, entered `confirm`, and retried successfully in reuse mode (514ms).
+The model/CLI/preflight and transcript home were fixture-controlled. This validates
+the modal and recovery wiring, not real authentication or account setup. Real
+login failure/first-run provider dialogs and split-pane visual QA remain open.
+Recovery drafts are tracked too: retry cannot overwrite an unsent setup input,
+and terminal control replies do not invalidate a completed receipt.

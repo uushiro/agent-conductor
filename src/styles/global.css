@@ -886,6 +886,8 @@ html, body, #root {
 .agent-switch-history-toggle { margin-left: auto; color: var(--text-secondary); }
 .agent-switch-status { min-height: 0; color: var(--text-secondary); margin-top: 3px; }
 .agent-switch-error { color: var(--accent-red); }
+.agent-switch-success { color: var(--accent-green); }
+.agent-switch-recovery-open { margin-left: 2px; }
 .agent-switch-history {
   margin-top: 5px;
   padding: 6px 8px;
@@ -902,6 +904,65 @@ html, body, #root {
   font: inherit;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.agent-switch-metrics {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.agent-switch-metrics p { margin: 0 0 3px; color: var(--text-muted); }
+.agent-switch-metrics-entry { display: grid; gap: 2px; color: var(--text-secondary); }
+.agent-switch-metrics-entry strong { color: var(--text-primary); }
+
+.agent-switch-recovery-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(0 0 0 / 58%);
+}
+.agent-switch-recovery {
+  width: min(760px, 100%);
+  max-height: min(680px, 100%);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  box-shadow: 0 14px 50px rgb(0 0 0 / 45%);
+}
+.agent-switch-recovery header,
+.agent-switch-recovery footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+}
+.agent-switch-recovery header p { margin: 3px 0 0; font-size: 12px; color: var(--text-secondary); }
+.agent-switch-recovery header button,
+.agent-switch-recovery footer button {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.agent-switch-recovery header button { font-size: 18px; line-height: 1; }
+.agent-switch-recovery footer { justify-content: flex-end; border-top: 1px solid var(--border); }
+.agent-switch-recovery-retry { border-color: var(--accent) !important; }
+.agent-switch-recovery-exited { margin: 0 12px 8px; color: var(--accent-yellow); font-size: 12px; }
+.agent-switch-recovery-terminal {
+  height: min(420px, 56vh);
+  min-height: 180px;
+  margin: 0 12px 10px;
+  overflow: hidden;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
 }
 .sr-only {
   position: absolute;
@@ -2421,4 +2482,9 @@ html, body, #root {
 .terminal-container .xterm * {
   user-select: none !important;
   -webkit-user-select: none !important;
+}
+.agent-switch-recovery-error {
+  margin: 0 12px 8px;
+  color: var(--accent-red);
+  font-size: 12px;
 }

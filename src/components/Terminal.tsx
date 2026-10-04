@@ -1,4 +1,4 @@
-import { useEffect, useRef, type CSSProperties } from 'react'
+import { useCallback, useEffect, useRef, type CSSProperties } from 'react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -40,6 +40,18 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
   const inputDisabledRef = useRef(inputDisabled)
   const visibleRef = useRef(visible)
   const focusedRef = useRef(focused)
+  // Reset output can arrive before the handoff state has re-enabled input.
+  // Keep its token until this pane is visibly focused and actually usable.
+  const pendingRenderTokenRef = useRef<string | null>(null)
+  const resetWriteCompleteRef = useRef(false)
+  const acknowledgeRenderedReset = useCallback(() => {
+    const token = pendingRenderTokenRef.current
+    const term = terminalRef.current
+    if (!token || !term || !resetWriteCompleteRef.current || inputDisabledRef.current || !visibleRef.current || !focusedRef.current) return
+    term.focus()
+    window.electronAPI.acknowledgeAgentSwitchRender(tabId, token)
+    pendingRenderTokenRef.current = null
+  }, [tabId])
   inputDisabledRef.current = inputDisabled
   visibleRef.current = visible
   focusedRef.current = focused
@@ -167,8 +179,10 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
     }
     const removeDataListener = window.electronAPI.onTerminalData(handler)
 
-    const removeResetListener = window.electronAPI.onTerminalReset((incomingTabId, data) => {
+    const removeResetListener = window.electronAPI.onTerminalReset((incomingTabId, data, renderToken) => {
       if (incomingTabId !== tabId) return
+      pendingRenderTokenRef.current = null
+      resetWriteCompleteRef.current = false
       term.reset()
       const restoreGeometry = () => {
         // A same-tab handoff replaces the PTY, not the DOM container, so a
@@ -176,7 +190,12 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
         // 80x24 and must receive the existing pane's actual dimensions.
         fitAddon.fit()
         window.electronAPI.resizeTerminal(tabId, term.cols, term.rows)
-        if (visibleRef.current && focusedRef.current) term.focus()
+        // term.write invokes this callback only once its buffered reset content
+        // has reached xterm. Do not measure it yet: the status poll may still
+        // be disabling keyboard input for this pane.
+        resetWriteCompleteRef.current = true
+        if (renderToken) pendingRenderTokenRef.current = renderToken
+        acknowledgeRenderedReset()
       }
       if (data) term.write(data, restoreGeometry)
       else restoreGeometry()
@@ -215,7 +234,7 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
       if (xtermScreen) xtermScreen.removeEventListener('mousedown', handleForceSelection, true)
       term.dispose()
     }
-  }, [tabId])
+  }, [tabId, acknowledgeRenderedReset])
 
   // Update font size dynamically
   useEffect(() => {
@@ -246,7 +265,8 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
 
   useEffect(() => {
     if (terminalRef.current) terminalRef.current.options.cursorBlink = !inputDisabled
-  }, [inputDisabled])
+    acknowledgeRenderedReset()
+  }, [inputDisabled, visible, focused, acknowledgeRenderedReset])
 
   return (
     <div

@@ -2,110 +2,122 @@
 // and filesystem operations are injected so cancellation and rollback are testable.
 export class AgentSwitchController {
   constructor(adapter, { timeoutMs = 60000, pollMs = 500 } = {}) {
-    this.adapter = adapter
-    this.timeoutMs = timeoutMs
-    this.pollMs = pollMs
-    this.groups = new Map()
+    this.adapter = adapter; this.timeoutMs = timeoutMs; this.pollMs = pollMs
+    this.groups = new Map(); this._metrics = []
   }
-
   group(id) {
-    if (!this.groups.has(id)) this.groups.set(id, { active: id, members: new Set([id]), history: [], pending: null, error: '' })
+    if (!this.groups.has(id)) this.groups.set(id, { active: id, members: new Set([id]), history: [], pending: null, error: '', errorCode: null, recovery: null, lastAttempt: null, progress: null })
     return this.groups.get(id)
   }
-
   active(id) { return this.groups.get(id)?.active ?? id }
-  owner(runtime) {
-    for (const [id, group] of this.groups) if (group.members.has(runtime)) return id
-    return runtime
+  owner(runtime) { for (const [id, group] of this.groups) if (group.members.has(runtime)) return id; return runtime }
+  blocked(runtime) { const group = this.groups.get(this.owner(runtime)); return !!group && (!!group.pending || group.active !== runtime) }
+  metrics() { return this._metrics.slice() }
+  recoveryRuntime(id) { const group = this.groups.get(id); return group?.pending ? null : group?.recovery?.runtime ?? null }
+  _progress(group, pending, stage) {
+    const now = Date.now(); pending.stages[stage] ??= now
+    group.progress = { stage, startedAt: pending.startedAt, stageStartedAt: pending.stages[stage], elapsedMs: now - pending.startedAt }
   }
-  blocked(runtime) {
-    const group = this.groups.get(this.owner(runtime))
-    return !!group && (!!group.pending || group.active !== runtime)
+  _metric(metric, logicalId) {
+    this._metrics.push(metric); if (this._metrics.length > 100) this._metrics.splice(0, this._metrics.length - 100)
+    try { this.adapter.recordMetric?.(metric, logicalId) } catch { /* metrics must not affect a handoff */ }
   }
-
+  _error(code, message) { const error = new Error(message); error.code = code; return error }
+  _cleanupRecovery(group, keepAgent) {
+    const recovery = group.recovery
+    if (!recovery || recovery.agent === keepAgent || !recovery.created) return
+    this.adapter.release(recovery.runtime); group.members.delete(recovery.runtime); group.recovery = null
+  }
   async state(id) {
-    const group = this.group(id)
-    let source
+    const group = this.group(id); let source
     try { source = await this.adapter.read(group.active) } catch { /* unavailable */ }
-    return {
-      agent: source?.agent ?? null,
-      phase: group.pending ? 'preparing' : group.error ? 'error' : 'idle',
-      target: group.pending?.target ?? null,
-      canSwitch: !group.pending && !!source?.ready,
-      reason: group.error || (source?.ready ? '' : source?.reason || '会話の完了を確認できません。'),
-      history: group.history.map(({ agent, text }) => ({ agent, text })),
-    }
+    const progress = group.progress && { ...group.progress, elapsedMs: Date.now() - group.progress.startedAt }
+    return { agent: source?.agent ?? null, phase: group.pending ? 'preparing' : group.error ? 'error' : 'idle', target: group.pending?.target ?? null,
+      canSwitch: !group.pending && !!source?.ready, reason: group.error || (source?.ready ? '' : source?.reason || '会話の完了を確認できません。'),
+      history: group.history.map(({ agent, text }) => ({ agent, text })), progress, errorCode: group.errorCode,
+      recovery: !group.pending && group.recovery ? { agent: group.recovery.agent, exited: group.recovery.exited } : null, lastAttempt: group.lastAttempt }
   }
-
   async switch(id, target) {
     const group = this.group(id)
-    if (group.pending) return { ok: false, error: '引き継ぎ中です。' }
-    if (!['claude', 'codex'].includes(target)) return { ok: false, error: '未対応の切り替え先です。' }
-    const token = this.adapter.token()
-    const pending = { target, token, runtime: null, created: false, cancelled: false }
-    group.pending = pending
-    group.error = ''
-    const startedAt = Date.now()
+    if (group.pending) return { ok: false, error: '引き継ぎ中です。', errorCode: 'in_progress' }
+    if (!['claude', 'codex'].includes(target)) return { ok: false, error: '未対応の切り替え先です。', errorCode: 'unsupported_target' }
+    const pending = { target, token: this.adapter.token(), runtime: null, created: false, cancelled: false, startedAt: Date.now(), stages: {} }
+    group.pending = pending; group.error = ''; group.errorCode = null; group.progress = null
+    let source, mode = 'new', outcome = 'failed', errorCode = null, activatedAt = null
     try {
-      const source = await this.adapter.read(group.active)
-      if (!source.ready || source.agent === target) throw new Error(source.reason || '切り替えできません。')
-      const prompt = this.adapter.prompt(source, token)
-      let existing
-      for (const runtime of group.members) {
+      this._progress(group, pending, 'reading')
+      try { source = await this.adapter.read(group.active) } catch { throw this._error('source_unavailable', '切り替え元の会話を読み取れません。') }
+      if (!source?.ready || !source.agent || source.agent === target) throw this._error(source?.errorCode || 'source_unavailable', source?.reason || '切り替え元の会話は引き継げる状態ではありません。')
+      if (pending.cancelled) throw this._error('cancelled', '切り替えを取り消しました。')
+      this._cleanupRecovery(group, target)
+      const prompt = this.adapter.prompt(source, pending.token); let existing = null
+      const recovery = group.recovery
+      if (recovery?.agent === target) {
+        if (recovery.exited || this.adapter.exited(recovery.runtime)) {
+          recovery.exited = true; this.adapter.release(recovery.runtime); group.members.delete(recovery.runtime); group.recovery = null
+        } else {
+          const saved = await this.adapter.read(recovery.runtime)
+          if (!saved.ready) throw this._error('setup_not_ready', '復帰先の会話が入力待ちではありません。設定を完了してから再試行してください。')
+          existing = recovery.runtime
+        }
+      }
+      if (!existing) for (const runtime of group.members) {
         if (runtime === group.active) continue
         const saved = await this.adapter.read(runtime)
-        if (saved.agent === target) {
-          if (!saved.ready) throw new Error('復帰先の会話が入力待ちではありません。元の作業を維持しています。')
-          existing = runtime
-          break
-        }
+        if (saved.agent !== target) continue
+        if (!saved.ready) { group.recovery = { agent: target, runtime, exited: this.adapter.exited(runtime), created: false }; throw this._error('setup_not_ready', '復帰先の会話が入力待ちではありません。設定を完了してから再試行してください。') }
+        existing = runtime; break
       }
-      if (pending.cancelled) throw new Error('切り替えを取り消しました。')
-      if (existing) {
-        pending.runtime = existing
-        await this.adapter.send(existing, prompt)
-      } else {
-        pending.runtime = this.adapter.create(target, source.cwd, prompt, token)
-        pending.created = true
-        group.members.add(pending.runtime)
+      if (pending.cancelled) throw this._error('cancelled', '切り替えを取り消しました。')
+      this._progress(group, pending, 'starting')
+      if (existing) { pending.runtime = existing; mode = 'reuse'; await this.adapter.send(existing, prompt) }
+      else {
+        if (this.adapter.preflight) await this.adapter.preflight(target, source.cwd)
+        if (pending.cancelled) throw this._error('cancelled', '切り替えを取り消しました。')
+        pending.runtime = await this.adapter.create(target, source.cwd, prompt, pending.token); pending.created = true; group.members.add(pending.runtime)
       }
-      const deadline = startedAt + this.timeoutMs
+      const deadline = pending.startedAt + this.timeoutMs
       while (!pending.cancelled && Date.now() < deadline) {
+        if (this.adapter.exited(pending.runtime)) throw this._error('target_exited', '切り替え先が終了しました。元の作業を維持しています。')
+        // Read first: the transcript itself is an observed startup signal and the
+        // host may update its runtime status as a side effect of this read.
         const result = await this.adapter.read(pending.runtime)
-        // Require a standalone nonce line in the final completed assistant reply.
-        // CLI hooks may add explanatory prose; startup/user echoes never qualify.
-        if (result.ready && result.lastEventAt >= startedAt && result.lastAssistantText?.split(/\r?\n/).some(line => line.trim() === `AC_HANDOFF_READY:${token}`)) {
+        if (result.errorCode) throw this._error(result.errorCode, result.reason || '切り替え先の会話を検証できませんでした。')
+        const status = this.adapter.status ? await this.adapter.status(pending.runtime) : { started: true }
+        if (status?.errorCode) throw this._error(status.errorCode, status.reason || '切り替え先を開始できませんでした。')
+        if (!status?.started && !result.ready && !result.text) { this._progress(group, pending, 'starting'); await new Promise(resolve => setTimeout(resolve, this.pollMs)); continue }
+        this._progress(group, pending, 'waiting')
+        if (result.ready && result.lastEventAt >= pending.startedAt && result.lastAssistantText?.split(/\r?\n/).some(line => line.trim() === `AC_HANDOFF_READY:${pending.token}`)) {
           if (pending.cancelled) break
-          group.history.push({ agent: source.agent, text: source.text })
-          group.history = group.history.slice(-6)
-          group.active = pending.runtime
-          group.pending = null
-          this.adapter.activate(id, group.active)
-          return { ok: true }
+          group.history.push({ agent: source.agent, text: source.text }); group.history = group.history.slice(-6)
+          group.active = pending.runtime; group.pending = null; group.progress = null; group.recovery = null
+          activatedAt = Date.now(); this.adapter.activate(id, group.active); outcome = 'success'; return { ok: true }
         }
-        if (this.adapter.exited(pending.runtime)) throw new Error('切り替え先が終了しました。元の作業を維持しています。')
         await new Promise(resolve => setTimeout(resolve, this.pollMs))
       }
-      throw new Error(pending.cancelled ? '切り替えを取り消しました。' : '引き継ぎを確認できませんでした。切り替え先のログイン・初回設定を確認してください。元の作業は維持しています。')
+      throw this._error(pending.cancelled ? 'cancelled' : 'timeout', pending.cancelled ? '切り替えを取り消しました。' : '引き継ぎを確認できませんでした。切り替え先のログイン・初回設定を確認してください。元の作業は維持しています。')
     } catch (error) {
-      if (pending.runtime && pending.created) {
-        this.adapter.release(pending.runtime)
-        group.members.delete(pending.runtime)
+      errorCode = pending.cancelled ? 'cancelled' : error?.code || 'failed'; outcome = errorCode === 'cancelled' ? 'cancelled' : 'failed'
+      if (pending.runtime) {
+        const exited = this.adapter.exited(pending.runtime)
+        if (outcome === 'cancelled' && pending.created) { this.adapter.release(pending.runtime); group.members.delete(pending.runtime); if (group.recovery?.runtime === pending.runtime) group.recovery = null }
+        else group.recovery = { agent: target, runtime: pending.runtime, exited, created: pending.created }
       }
-      group.error = error instanceof Error ? error.message : '切り替えに失敗しました。'
-      return { ok: false, error: group.error }
+      group.error = error instanceof Error ? error.message : '切り替えに失敗しました。'; group.errorCode = errorCode
+      return { ok: false, error: group.error, errorCode }
     } finally {
+      const end = Date.now(), stages = pending.stages
+      const waitEnd = activatedAt ?? end
+      const durations = { readMs: (stages.starting ?? end) - pending.startedAt, startMs: (stages.waiting ?? end) - (stages.starting ?? end), waitMs: waitEnd - (stages.waiting ?? waitEnd), activateMs: activatedAt === null ? 0 : end - activatedAt, totalMs: end - pending.startedAt }
+      // Durations end at dispatch; a renderer-ready acknowledgement is recorded by
+      // the host later as rendererMs, so these boundaries stay observation-based.
+      const metric = { from: source?.agent ?? null, to: target, mode, outcome, errorCode, startedAt: pending.startedAt, durations }
+      group.lastAttempt = metric; this._metric(metric, id)
       if (group.pending === pending) group.pending = null
+      if (group.progress?.startedAt === pending.startedAt) group.progress = null
     }
   }
-
   cancel(id) { const pending = this.groups.get(id)?.pending; if (pending) pending.cancelled = true }
-  close(id) {
-    const group = this.groups.get(id)
-    if (!group) return
-    this.cancel(id)
-    for (const runtime of group.members) this.adapter.release(runtime)
-    this.groups.delete(id)
-  }
+  close(id) { const group = this.groups.get(id); if (!group) return; this.cancel(id); for (const runtime of group.members) this.adapter.release(runtime); this.groups.delete(id) }
   clear() { for (const id of [...this.groups.keys()]) this.close(id) }
 }

@@ -6,8 +6,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   switchAgent: (tabId: string, target: 'claude' | 'codex') =>
     ipcRenderer.invoke('terminal:switch-agent', tabId, target) as Promise<{ ok: boolean; error?: string }>,
   cancelAgentSwitch: (tabId: string) => ipcRenderer.invoke('terminal:cancel-agent-switch', tabId) as Promise<void>,
-  onTerminalReset: (callback: (tabId: string, data: string) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, tabId: string, data: string) => callback(tabId, data)
+  getAgentSwitchRecovery: (tabId: string) => ipcRenderer.invoke('terminal:agent-switch-recovery', tabId),
+  sendAgentSwitchRecoveryInput: (tabId: string, data: string) => ipcRenderer.invoke('terminal:agent-switch-recovery-input', tabId, data),
+  resizeAgentSwitchRecovery: (tabId: string, cols: number, rows: number) => ipcRenderer.invoke('terminal:agent-switch-recovery-resize', tabId, cols, rows),
+  getAgentSwitchMetrics: () => ipcRenderer.invoke('terminal:agent-switch-metrics'),
+  acknowledgeAgentSwitchRender: (tabId: string, token: string) => ipcRenderer.send('terminal:agent-switch-rendered', tabId, token),
+  onTerminalReset: (callback: (tabId: string, data: string, token?: string) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, tabId: string, data: string, token?: string) => callback(tabId, data, token)
     ipcRenderer.on('terminal:reset', listener)
     return () => ipcRenderer.removeListener('terminal:reset', listener)
   },

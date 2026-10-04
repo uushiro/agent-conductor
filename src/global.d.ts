@@ -67,10 +67,24 @@ export interface ElectronAPI {
     reason: string
     target: 'claude' | 'codex' | null
     history: Array<{ agent: 'claude' | 'codex'; text: string }>
+    progress: {
+      stage: 'reading' | 'starting' | 'waiting'
+      startedAt: number
+      stageStartedAt: number
+      elapsedMs: number
+    } | null
+    errorCode: string | null
+    recovery: { agent: 'claude' | 'codex'; exited: boolean } | null
+    lastAttempt: AgentSwitchAttempt | null
   }>
   switchAgent: (tabId: string, target: 'claude' | 'codex') => Promise<{ ok: boolean; error?: string }>
   cancelAgentSwitch: (tabId: string) => Promise<void>
-  onTerminalReset: (callback: (tabId: string, data: string) => void) => () => void
+  getAgentSwitchRecovery: (tabId: string) => Promise<{ agent: 'claude' | 'codex'; exited: boolean; output: string } | null>
+  sendAgentSwitchRecoveryInput: (tabId: string, data: string) => Promise<boolean>
+  resizeAgentSwitchRecovery: (tabId: string, cols: number, rows: number) => Promise<boolean>
+  getAgentSwitchMetrics: () => Promise<AgentSwitchAttempt[]>
+  acknowledgeAgentSwitchRender: (tabId: string, renderToken: string) => void
+  onTerminalReset: (callback: (tabId: string, data: string, renderToken?: string) => void) => () => void
   createTerminal: (cwd?: string, pendingSessionId?: string, pendingAgent?: 'claude' | 'codex') => Promise<string>
   createWorktreeTerminal: (tabId: string, branchName?: string) => Promise<
     { ok: true; tabId: string; worktreePath: string; branch: string } | { ok: false; error: string }
@@ -111,6 +125,23 @@ export interface ElectronAPI {
     agent: 'claude' | 'codex'; cwd?: string
   }>>
   setResumeSessionTitle: (agent: 'claude' | 'codex', sessionId: string, title: string | null) => Promise<boolean>
+}
+
+export interface AgentSwitchAttempt {
+  from: 'claude' | 'codex' | null
+  to: 'claude' | 'codex' | null
+  mode: 'new' | 'reuse'
+  outcome: 'success' | 'cancelled' | 'failed'
+  errorCode: string | null
+  startedAt: number
+  durations: {
+    readMs: number
+    startMs: number
+    waitMs: number
+    activateMs: number
+    totalMs: number
+    rendererMs?: number | null
+  }
 }
 
 declare global {
