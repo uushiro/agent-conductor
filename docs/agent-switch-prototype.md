@@ -30,8 +30,8 @@ tab ID stays the same. Run this checklist manually before relying on the feature
 - [ ] In split view, trigger a reset in each pane and verify only the focused,
   visible pane receives terminal focus.
 - [ ] Restart the app and restore an active CLI session. Verify normal session
-  restore works. Parked in-memory handoff history is intentionally not restored
-  in this initial prototype.
+  restore works, including the exact parked session and bounded canonical history.
+  Missing/mismatched sessions must not be replaced by another conversation.
 
 ## Content and limits
 
@@ -43,7 +43,7 @@ tab ID stays the same. Run this checklist manually before relying on the feature
   configured model for a fresh session; returning to a parked session retains
   that session's existing model.
 
-## Initial scope and known limits
+## Current scope and known limits
 
 - Experimental Claude ↔ Codex handoff only; no within-provider model selector.
 - Uses existing CLI authentication and permission settings. Both CLIs must be
@@ -60,19 +60,19 @@ tab ID stays the same. Run this checklist manually before relying on the feature
 - Transfers up to 30,000 characters of text (start + recent conversation), with
   explicit truncation/omission markers. It is not a semantic summary; middle
   decisions, images, reasoning and tool result bodies may be absent. Original
-  transcript paths are included for later reference. Repeated handoffs may nest
-  prior context and need further compaction design.
+  transcript paths are included for later reference. Registered generated receipts
+  are omitted from the canonical ledger; older unregistered receipts are retained.
 - An acknowledgement turn uses the target CLI; this can consume model quota.
   CLI startup/context echo may remain visible in terminal scrollback.
 - The source is retained until the target acknowledges reception. Cancellation
   discards a newly launched target; an existing parked session is preserved.
   Failure retains at most one recovery target rather than silently discarding its
   setup/error screen. Recovery input is rejected during a pending retry.
-- No automatic task continuation, queued busy switching, or drafting during
-  handoff yet. Existing terminal input is blocked only during preparation.
+- No automatic task continuation or queued busy switching. Direct terminal input
+  is blocked during preparation; the bottom composer remains editable as a draft.
 - Tab ID, position, name and working directory remain stable. Six recent text
-  handoffs can be inspected in memory. Restart restores the active session only;
-  earlier sessions remain in each CLI's normal history, not in a rebuilt tab chain.
+  handoffs and exact committed session linkage persist locally for restart.
+  In-progress draft text remains in memory only; see P2 below.
 
 ## Automated validation
 
@@ -190,3 +190,96 @@ the modal and recovery wiring, not real authentication or account setup. Real
 login failure/first-run provider dialogs and split-pane visual QA remain open.
 Recovery drafts are tracked too: retry cannot overwrite an unsent setup input,
 and terminal control replies do not invalidate a completed receipt.
+
+
+## P1: canonical context and preview
+
+A bounded ledger keeps authored turns across agents and replacement runtimes. Only
+app-generated messages proven by exact session, stable message ID and content hash
+are omitted; exact standalone acknowledgement turns are omitted only when directly
+paired with that registered prompt. Similar authored markers, ambiguous IDs and
+hook prose stay intact. Receipt proofs are recorded during polling as well as on
+success, so known failed-attempt prompts do not become nested history on retry.
+
+The toolbar preview shows the exact bounded context, cumulative unique omission
+count and truncation warning. Earlier transfers and timing details are collapsed
+separately. Limits include 500 stored turns, 1 MB text and 30,000 output characters;
+a single oversized turn uses byte-safe head/tail storage with disclosure. This is
+not semantic summarization: middle decisions can be lost at the output bound, and
+images/tool payloads are still omitted. Raw native CLI echoes remain visible; ANSI
+filtering is deliberately not used to conceal them.
+
+
+## P2: drafts and restart lineage
+
+The existing bottom composer stores text per logical tab in main while the app is
+running, and retains attachment chips per tab in the renderer. Once a tab uses
+handoff, the composer checks destination identity, input generation and draft
+revision before writing. A failed/cancelled switch does not clear it. Returning to a tab with the composer
+open focuses its loaded draft. Submission
+is explicit; direct-submit versus paste-to-terminal preference is preserved.
+Legacy delayed attachment/Enter writes expire once a tab starts a handoff, even
+after cancellation or a return to the original agent.
+Attachments in this experimental checked mode are retained with an instruction
+to attach through the terminal; their delayed auto-submit is not enabled.
+
+Session schema v3 saves exact committed active/parked identities and cwd, bounded
+canonical records, receipt proofs and six display histories. It does not save
+unfinished fresh targets. A failed or missing linked session never falls back to
+the most recent conversation. Active restore replaces the new empty shell under
+the same public ID using direct CLI resume arguments and a fresh receipt prompt;
+old completed logs cannot mark it ready. Parked sessions are resumed lazily using
+exact IDs and the same fresh receipt check. v1 model migration still applies only
+to v1; v2 explicit model choices are retained. Draft text is not disk-persisted.
+
+A real Claude test exposed a transport mismatch: a long whole-message paste was
+wrapped in `<pasted_content>`, so Claude refused to follow the receipt instruction
+inside it. The short user-requested instruction now stays outside the paste, and
+only the transcript body is quoted. Known CLI envelopes qualify for omission only
+when their IDs and whole inner payload match the generated message; the actual
+turn ID and hash remain the stored proof. Unknown wrappers remain intact.
+
+Codex required a different transport: sending a typed instruction immediately before
+a large pasted body caused the instruction to disappear from its recorded user
+turn. Codex therefore receives the whole prompt in one bracketed paste, while
+Claude receives the short instruction outside the pasted body. Neither path
+weakens the exact completed receipt check. The intermediate build's timeout is
+kept separate from the final-build verification.
+
+Native Codex also trims the final submit newlines from a pasted user turn. Receipt
+registration compares the entire generated payload modulo trailing whitespace,
+then stores the actual logged turn ID/hash. Interior changes and added prose are
+not normalized away. A regression test covers trimming, repeated preview and
+restart, plus near-matching authored text that must remain visible. Previously
+unrecognized turns are retained; the fix does not retroactively delete them.
+
+## Final P1/P2 native verification
+
+With the trailing-whitespace fix, six actual toolbar switches (three roundtrips)
+succeeded in reuse mode: 4.089 / 4.127 / 8.150 / 12.362 / 4.594 / 9.866 seconds.
+Renderer input-ready acknowledgements ranged from 9 to 23 ms. This is a small
+quality sample, separate from both the older P0 benchmark and failed intermediate
+builds. It is not a performance guarantee.
+
+Both active directions were restarted: Claude-active/Codex-parked and
+Codex-active/Claude-parked restored their exact saved IDs, completed fresh receipts
+and reused the original parked session. The final run deliberately retained old
+unrecognized pre-fix handoff text as a baseline. After authored condition updates,
+26,702 characters and three existing transcript boundaries remained unchanged for
+four further switches; only proven receipt omission counts increased.
+
+Draft text survived leaving and returning to its logical tab, remained absent
+from the other tab, and reached the displayed Codex exactly once on explicit send.
+A separate normal Claude turn stalled for 3m34s and was manually interrupted; it
+is not counted as a handoff latency or a successful unattended turn.
+
+A no-hint five-field question returned the updated facts: 灯台 / 土曜 / 3500円 /
+白 / 社内. A draft entered during preparation survived UI cancellation, stayed
+with the original Codex tab and did not enter canonical history. Cancel is shown
+as a cancelled attempt with the source still usable. Opening the composer with
+its actual UI button and switching tabs verified draft retention and focus return;
+a closed composer intentionally does not receive automatic focus.
+
+The final P1/P2 build has not received responsive 800/1200px, split-pane, attachment
+or real account-login-failure QA. Automated validation is 43 passing tests plus
+production build and Electron TypeScript checks (existing bundle-size warning).

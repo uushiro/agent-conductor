@@ -11,6 +11,14 @@ export interface HandoffSession {
   text: string;
   lastEventAt: number;
   lastAssistantText: string;
+  turns?: HandoffTurn[];
+}
+
+export interface HandoffTurn {
+  id: string | null;
+  role: 'user' | 'assistant';
+  text: string;
+  timestamp: number;
 }
 
 export interface ReadHandoffSessionOptions {

@@ -21,6 +21,18 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
   const t = strings[lang]
   const [text, setText] = useState('')
   const [attachments, setAttachments] = useState<string[]>([])
+  const [checkedMode, setCheckedMode] = useState(false)
+  const checkedTabsRef = useRef(new Set<string>())
+  const attachmentsByTabRef = useRef(new Map<string, string[]>())
+  const previousTabRef = useRef(activeTabId)
+  const [draftDestination, setDraftDestination] = useState<{ ready: boolean; agent: 'claude' | 'codex' | null; token: string; reason?: string } | null>(null)
+  const [draftLoaded, setDraftLoaded] = useState(false)
+  const editVersion = useRef(0)
+  const editQueues = useRef(new Map<string, Promise<{ text: string; revision: number }>>())
+  const sendingRef = useRef(false)
+  const [draftSending, setDraftSending] = useState(false)
+  const [draftError, setDraftError] = useState('')
+  const tabGeneration = useRef(0)
   const [tuiMenuOpen, setTuiMenuOpen] = useState(false)
   const currentHeightRef = useRef(() => {
     const saved = localStorage.getItem(STORAGE_KEY)
@@ -51,15 +63,32 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
   }, [])
 
   useEffect(() => {
-    if (visible) {
-      setTimeout(() => textareaRef.current?.focus(), 50)
-    } else {
-      setTuiMenuOpen(false)
-    }
-  }, [visible])
+    if (!visible) { setTuiMenuOpen(false); return }
+    if (!draftLoaded) return
+    const timer = setTimeout(() => textareaRef.current?.focus(), 50)
+    return () => clearTimeout(timer)
+  }, [visible, activeTabId, draftLoaded])
 
   useEffect(() => {
-    setTuiMenuOpen(false)
+    // Attachments remain renderer-local, but are keyed by stable logical tab.
+    attachmentsByTabRef.current.set(previousTabRef.current, attachments)
+    previousTabRef.current = activeTabId
+    setAttachments(attachmentsByTabRef.current.get(activeTabId) ?? [])
+  }, [activeTabId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    attachmentsByTabRef.current.set(previousTabRef.current, attachments)
+  }, [attachments])
+
+  useEffect(() => {
+    const epoch = ++tabGeneration.current
+    setTuiMenuOpen(false); setCheckedMode(checkedTabsRef.current.has(activeTabId)); setDraftDestination(null); setDraftError(''); setDraftSending(false); setDraftLoaded(false); sendingRef.current = false
+    void Promise.all([(editQueues.current.get(activeTabId) ?? Promise.resolve()).catch(() => undefined).then(() => window.electronAPI.getHandoffDraft(activeTabId)), window.electronAPI.getHandoffDraftDestination(activeTabId), window.electronAPI.getAgentSwitchState(activeTabId)]).then(([draft, destination, handoff]) => {
+      if (epoch !== tabGeneration.current) return
+      const observed = handoff.phase === 'preparing' || !!handoff.recovery || !!handoff.lastAttempt || handoff.history.length > 0; if (observed) checkedTabsRef.current.add(activeTabId); setCheckedMode(observed || checkedTabsRef.current.has(activeTabId)); setText(draft.text); setDraftLoaded(true); setDraftDestination(destination)
+    }).catch(() => { if (epoch === tabGeneration.current) setDraftError('下書きを読み込めませんでした。') })
+    const timer = window.setInterval(() => void Promise.all([window.electronAPI.getHandoffDraftDestination(activeTabId), window.electronAPI.getAgentSwitchState(activeTabId)]).then(([d, handoff]) => { if (epoch !== tabGeneration.current) return; const observed = handoff.phase === 'preparing' || !!handoff.recovery || !!handoff.lastAttempt || handoff.history.length > 0; if (observed) checkedTabsRef.current.add(activeTabId); setCheckedMode(observed || checkedTabsRef.current.has(activeTabId)); setDraftDestination(d) }).catch(() => undefined), 500)
+    return () => { ++tabGeneration.current; window.clearInterval(timer) }
   }, [activeTabId])
 
   useEffect(() => {
@@ -106,9 +135,47 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
     window.addEventListener('mouseup', onUp)
   }, [])
 
-  const sendText = useCallback(async () => {
+  const queueDraft = (value: string) => {
+    const queued = (editQueues.current.get(activeTabId) ?? Promise.resolve()).catch(() => undefined).then(() => window.electronAPI.setHandoffDraft(activeTabId, value))
+    editQueues.current.set(activeTabId, queued)
+    return queued
+  }
+  const editText = (value: string) => {
+    ++editVersion.current; setText(value); setDraftError('')
+    const epoch = tabGeneration.current
+    void queueDraft(value).catch(() => { if (epoch === tabGeneration.current) setDraftError('下書きを保存できませんでした。') })
+  }
+
+  const sendText = async () => {
+    if (!draftLoaded || sendingRef.current || (!text.trim() && attachments.length === 0) || !activeTabId) return
+    const epoch = tabGeneration.current, version = editVersion.current
+    sendingRef.current = true; setDraftSending(true)
+    try {
+    const fresh = await window.electronAPI.getAgentSwitchState(activeTabId)
+    if (epoch !== tabGeneration.current || version !== editVersion.current) return
+    const nowChecked = checkedMode || fresh.phase === 'preparing' || !!fresh.recovery || !!fresh.lastAttempt || fresh.history.length > 0
+    if (nowChecked) {
+      checkedTabsRef.current.add(activeTabId); setCheckedMode(true)
+      if (attachments.length > 0) { setDraftError('添付は保持しています。切り替え後の添付送信は端末から行ってください。'); return }
+      if (!draftDestination?.ready) { setDraftError('入力待ちになってから送信してください。下書きは保持しています。'); return }
+      const token = draftDestination.token
+      const draft = await (editQueues.current.get(activeTabId) ?? window.electronAPI.getHandoffDraft(activeTabId))
+      if (epoch !== tabGeneration.current || version !== editVersion.current) return
+      if (draft.text !== text) { setDraftError('下書きの保存を確認できませんでした。内容を確認してください。'); return }
+      const submission = window.electronAPI.submitHandoffDraft(activeTabId, draft.revision, token, inputSubmitMode === 'direct')
+      // Returning to this tab waits for an in-flight submission before loading
+      // its draft, so a stale read cannot revive already-sent text.
+      editQueues.current.set(activeTabId, submission.then(result => result.ok && result.draft ? result.draft : draft, () => draft))
+      const result = await submission
+      if (result.ok && result.draft) editQueues.current.set(activeTabId, Promise.resolve(result.draft))
+      if (epoch !== tabGeneration.current) return
+      if (result.ok) { setText(''); setDraftError(''); setTimeout(() => textareaRef.current?.focus(), 0) }
+      else setDraftError(result.error || '送信できませんでした。下書きは保持しています。')
+      return
+    }
     if ((!text.trim() && attachments.length === 0) || !activeTabId) return
 
+    const sendLegacyInput = (data: string) => window.electronAPI.sendTerminalInput(activeTabId, data, true)
     const hasAttachments = attachments.length > 0
 
     if (text && hasAttachments) {
@@ -116,49 +183,52 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
       // まとめて送ると Claude Code がファイルパスを attachment として認識しない場合がある。
       // 1. テキスト部分を送信
       if (text.includes('\n')) {
-        window.electronAPI.sendTerminalInput(activeTabId, '\x1b[200~' + text + '\x1b[201~')
+        sendLegacyInput( '\x1b[200~' + text + '\x1b[201~')
       } else {
-        window.electronAPI.sendTerminalInput(activeTabId, text)
+        sendLegacyInput( text)
       }
       // 2. ファイルパスを別の bracket paste で追送
       const filePart = '\n' + attachments.join('\n')
       setTimeout(() => {
-        window.electronAPI.sendTerminalInput(activeTabId, '\x1b[200~' + filePart + '\x1b[201~')
+        sendLegacyInput( '\x1b[200~' + filePart + '\x1b[201~')
       }, 150)
     } else {
       // テキストのみ、またはファイルのみ
       const filePart = hasAttachments ? '\n' + attachments.join('\n') : ''
       const fullText = text + filePart
       if (fullText.includes('\n')) {
-        window.electronAPI.sendTerminalInput(activeTabId, '\x1b[200~' + fullText + '\x1b[201~')
+        sendLegacyInput( '\x1b[200~' + fullText + '\x1b[201~')
       } else {
-        window.electronAPI.sendTerminalInput(activeTabId, fullText)
+        sendLegacyInput( fullText)
       }
     }
 
     setText('')
+    void queueDraft('').catch(() => undefined)
     setAttachments([])
     if (inputSubmitMode === 'direct') {
       if (hasAttachments) {
         // 画像UIが確実に出てから dismiss → submit
         // 1回目: 画像UIをdismiss（十分な余裕を持たせる）
         setTimeout(() => {
-          window.electronAPI.sendTerminalInput(activeTabId, '\r')
+          sendLegacyInput( '\r')
           // 2回目: dismissが完了してからsubmit
           setTimeout(() => {
-            window.electronAPI.sendTerminalInput(activeTabId, '\r')
+            sendLegacyInput( '\r')
           }, 1000)
         }, 800)
       } else {
         // 改行ありのブラケットペーストはClaude Codeの処理を待つ
         const delay = text.includes('\n') ? 400 : 80
         setTimeout(() => {
-          window.electronAPI.sendTerminalInput(activeTabId, '\r')
+          sendLegacyInput( '\r')
         }, delay)
       }
     }
     setTimeout(() => textareaRef.current?.focus(), 30)
-  }, [text, attachments, activeTabId, inputSubmitMode])
+    } catch { if (epoch === tabGeneration.current) setDraftError('送信結果を確認できませんでした。会話を確認してから再試行してください。') }
+    finally { if (epoch === tabGeneration.current) { sendingRef.current = false; setDraftSending(false) } }
+  }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Escape') {
@@ -201,11 +271,15 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
   }
 
   const handleAttach = useCallback(async () => {
+    const owner = activeTabId, epoch = tabGeneration.current
     const files = await window.electronAPI.openFileDialog()
+    if (files.length > 0 && epoch !== tabGeneration.current) {
+      attachmentsByTabRef.current.set(owner, [...new Set([...(attachmentsByTabRef.current.get(owner) ?? []), ...files])]); return
+    }
     if (files.length > 0) {
       setAttachments((prev) => [...new Set([...prev, ...files])])
     }
-  }, [])
+  }, [activeTabId])
 
   const sendTuiKey = useCallback((sequence: string) => {
     window.electronAPI.sendTerminalInput(activeTabId, sequence)
@@ -263,7 +337,9 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
               ref={textareaRef}
               className="terminal-input-textarea"
               value={text}
-              onChange={(e) => setText(e.target.value)}
+              disabled={!draftLoaded || draftSending}
+              maxLength={30000}
+              onChange={(e) => editText(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={placeholder}
               onPaste={async (e) => {
@@ -271,11 +347,15 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
                 const imageItem = items.find((i) => i.type.startsWith('image/'))
                 if (!imageItem) return
                 e.preventDefault()
+                const owner = activeTabId, epoch = tabGeneration.current
                 const tmpPath = `/tmp/paste-${Date.now()}.png`
                 const ok = await window.electronAPI.saveClipboardImage(tmpPath)
+                if (ok && epoch !== tabGeneration.current) { attachmentsByTabRef.current.set(owner, [...new Set([...(attachmentsByTabRef.current.get(owner) ?? []), tmpPath])]); return }
                 if (ok) setAttachments((prev) => [...new Set([...prev, tmpPath])])
               }}
             />
+            {checkedMode && draftDestination && <span className="handoff-composer-target">{draftDestination.ready ? `${inputSubmitMode === 'direct' ? '送信先' : '入力先'}：${draftDestination.agent === 'claude' ? 'Claude' : draftDestination.agent === 'codex' ? 'Codex' : '—'}` : (draftDestination.reason || '送信先を確認中')}</span>}
+            {draftError && <span className="handoff-composer-error" role="alert">{draftError}</span>}
             {attachments.length > 0 && (
               <div ref={attachmentsRef} className="terminal-input-attachments">
                 {attachments.map((f) => {
@@ -312,7 +392,7 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
               <button
                 className="terminal-input-send"
                 onClick={sendText}
-                disabled={!text.trim() && attachments.length === 0}
+                disabled={!draftLoaded || draftSending || (!text.trim() && attachments.length === 0)}
               >
                 Send
               </button>

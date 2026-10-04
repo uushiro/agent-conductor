@@ -1,3 +1,4 @@
+import type { HandoffContext, HandoffContextStats } from './handoff-context.mjs';
 export type SwitchAgent = 'claude' | 'codex';
 
 export interface SwitchSession {
@@ -30,6 +31,7 @@ export interface AgentSwitchAdapter {
   activate(logicalId: string, runtimeId: string): void;
   exited(id: string): boolean;
   release(id: string): void;
+  restoreParked?(logicalId: string, descriptor: { agent: SwitchAgent; sessionId: string; cwd: string; claudeResumeParentId?: string | null }, prompt: string, token: string): Promise<{ runtime?: string; errorCode?: string; reason?: string }>;
   preflight?(agent: SwitchAgent, cwd: string): Promise<void>;
   status?(id: string): { started: boolean; errorCode?: string; reason?: string } | Promise<{ started: boolean; errorCode?: string; reason?: string }>;
   recordMetric?(metric: SwitchMetric, logicalId: string): void;
@@ -49,8 +51,10 @@ export interface AgentSwitchState {
 }
 
 export interface AgentSwitchGroup {
+  context: HandoffContext;
   active: string;
   members: Set<string>;
+  parked: Map<SwitchAgent, { agent: SwitchAgent; sessionId: string; cwd: string; claudeResumeParentId?: string | null }>;
   history: Array<{ agent: SwitchAgent; text: string }>;
   pending: unknown;
   error: string;
@@ -63,13 +67,16 @@ export interface AgentSwitchGroup {
 export class AgentSwitchController {
   groups: Map<string, AgentSwitchGroup>;
   constructor(adapter: AgentSwitchAdapter, options?: { timeoutMs?: number; pollMs?: number });
+  group(id: string): AgentSwitchGroup;
   active(id: string): string;
   owner(runtime: string): string;
   blocked(runtime: string): boolean;
   state(id: string): Promise<AgentSwitchState>;
+  preview(id: string): Promise<{ text: string; stats: HandoffContextStats; ready: boolean; reason: string }>;
   switch(id: string, target: SwitchAgent): Promise<{ ok: boolean; error?: string; errorCode?: string }>;
   metrics(): SwitchMetric[];
   recoveryRuntime(id: string): string | null;
+  restoreLineage(id: string, lineage?: { parked?: Array<{ agent: SwitchAgent; sessionId: string; cwd: string; claudeResumeParentId?: string | null }>; history?: Array<{ agent: SwitchAgent; text: string }>; context?: unknown }): AgentSwitchGroup | null;
   cancel(id: string): void;
   close(id: string): void;
   clear(): void;

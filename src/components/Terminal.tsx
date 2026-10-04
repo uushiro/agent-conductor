@@ -48,7 +48,9 @@ export function Terminal({ tabId, visible, focused, fontSize, paneStyle, onFocus
     const token = pendingRenderTokenRef.current
     const term = terminalRef.current
     if (!token || !term || !resetWriteCompleteRef.current || inputDisabledRef.current || !visibleRef.current || !focusedRef.current) return
-    term.focus()
+    // A handoff can finish while the user is drafting in the shared composer.
+    // Keep that editing focus; terminal input is ready without stealing it.
+    if (!document.activeElement?.classList.contains('terminal-input-textarea')) term.focus()
     window.electronAPI.acknowledgeAgentSwitchRender(tabId, token)
     pendingRenderTokenRef.current = null
   }, [tabId])

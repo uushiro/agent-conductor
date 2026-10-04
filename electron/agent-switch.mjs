@@ -1,3 +1,5 @@
+import { HandoffContext } from './handoff-context.mjs'
+
 // Coordinates a handoff without destroying the working source session. All CLI
 // and filesystem operations are injected so cancellation and rollback are testable.
 export class AgentSwitchController {
@@ -6,7 +8,7 @@ export class AgentSwitchController {
     this.groups = new Map(); this._metrics = []
   }
   group(id) {
-    if (!this.groups.has(id)) this.groups.set(id, { active: id, members: new Set([id]), history: [], pending: null, error: '', errorCode: null, recovery: null, lastAttempt: null, progress: null })
+    if (!this.groups.has(id)) this.groups.set(id, { active: id, members: new Set([id]), parked: new Map(), history: [], pending: null, error: '', errorCode: null, recovery: null, lastAttempt: null, progress: null, context: new HandoffContext() })
     return this.groups.get(id)
   }
   active(id) { return this.groups.get(id)?.active ?? id }
@@ -14,6 +16,21 @@ export class AgentSwitchController {
   blocked(runtime) { const group = this.groups.get(this.owner(runtime)); return !!group && (!!group.pending || group.active !== runtime) }
   metrics() { return this._metrics.slice() }
   recoveryRuntime(id) { const group = this.groups.get(id); return group?.pending ? null : group?.recovery?.runtime ?? null }
+  restoreLineage(id, lineage = {}) {
+    const group = this.group(id)
+    if (!lineage || typeof lineage !== 'object' || (lineage.parked !== undefined && !Array.isArray(lineage.parked)) || (lineage.history !== undefined && !Array.isArray(lineage.history))) return null
+    const parked = Array.isArray(lineage.parked) ? lineage.parked : []
+    if (parked.length > 2 || parked.some(item => !item || !['claude', 'codex'].includes(item.agent) || typeof item.sessionId !== 'string' || !item.sessionId || typeof item.cwd !== 'string' || !item.cwd)
+      || new Set(parked.map(item => item.agent)).size !== parked.length) return null
+    const history = Array.isArray(lineage.history) ? lineage.history : []
+    if (history.length > 6 || history.some(item => !item || !['claude', 'codex'].includes(item.agent) || typeof item.text !== 'string')) return null
+    const context = HandoffContext.fromSnapshot(lineage.context)
+    if (!context) return null
+    group.parked = new Map(parked.map(item => [item.agent, item]))
+    group.history = history
+    group.context = context
+    return group
+  }
   _progress(group, pending, stage) {
     const now = Date.now(); pending.stages[stage] ??= now
     group.progress = { stage, startedAt: pending.startedAt, stageStartedAt: pending.stages[stage], elapsedMs: now - pending.startedAt }
@@ -37,11 +54,18 @@ export class AgentSwitchController {
       history: group.history.map(({ agent, text }) => ({ agent, text })), progress, errorCode: group.errorCode,
       recovery: !group.pending && group.recovery ? { agent: group.recovery.agent, exited: group.recovery.exited } : null, lastAttempt: group.lastAttempt }
   }
+  async preview(id) {
+    const group = this.group(id)
+    let source
+    try { source = await this.adapter.read(group.active) } catch { /* preserve prior preview */ }
+    if (!source?.ready) return { ...group.context.serialize(), ready: false, reason: source?.reason || '会話の完了を確認してから内容を更新してください。' }
+    return { ...group.context.merge(source), ready: true, reason: '' }
+  }
   async switch(id, target) {
     const group = this.group(id)
     if (group.pending) return { ok: false, error: '引き継ぎ中です。', errorCode: 'in_progress' }
     if (!['claude', 'codex'].includes(target)) return { ok: false, error: '未対応の切り替え先です。', errorCode: 'unsupported_target' }
-    const pending = { target, token: this.adapter.token(), runtime: null, created: false, cancelled: false, startedAt: Date.now(), stages: {} }
+    const pending = { target, token: this.adapter.token(), runtime: null, created: false, promptDelivered: false, cancelled: false, startedAt: Date.now(), stages: {} }
     group.pending = pending; group.error = ''; group.errorCode = null; group.progress = null
     let source, mode = 'new', outcome = 'failed', errorCode = null, activatedAt = null
     try {
@@ -50,6 +74,7 @@ export class AgentSwitchController {
       if (!source?.ready || !source.agent || source.agent === target) throw this._error(source?.errorCode || 'source_unavailable', source?.reason || '切り替え元の会話は引き継げる状態ではありません。')
       if (pending.cancelled) throw this._error('cancelled', '切り替えを取り消しました。')
       this._cleanupRecovery(group, target)
+      source = { ...source, text: group.context.merge(source).text }
       const prompt = this.adapter.prompt(source, pending.token); let existing = null
       const recovery = group.recovery
       if (recovery?.agent === target) {
@@ -61,6 +86,16 @@ export class AgentSwitchController {
           existing = recovery.runtime
         }
       }
+      // A parked descriptor stays authoritative until receipt verification. A
+      // live recovery is reused first; an exited one falls back to this exact
+      // descriptor, never to a fresh target session.
+      const parked = group.parked.get(target)
+      if (!existing && parked) {
+        if (!this.adapter.restoreParked) throw this._error('parked_session_unavailable', '保存された待機会話を復元できません。')
+        const restored = await this.adapter.restoreParked(id, parked, prompt, pending.token)
+        if (!restored?.runtime) throw this._error(restored?.errorCode || 'parked_session_unavailable', restored?.reason || '保存された待機会話を復元できません。')
+        pending.runtime = restored.runtime; pending.created = false; pending.promptDelivered = true; group.members.add(pending.runtime); existing = pending.runtime
+      }
       if (!existing) for (const runtime of group.members) {
         if (runtime === group.active) continue
         const saved = await this.adapter.read(runtime)
@@ -70,7 +105,7 @@ export class AgentSwitchController {
       }
       if (pending.cancelled) throw this._error('cancelled', '切り替えを取り消しました。')
       this._progress(group, pending, 'starting')
-      if (existing) { pending.runtime = existing; mode = 'reuse'; await this.adapter.send(existing, prompt) }
+      if (existing) { pending.runtime = existing; mode = 'reuse'; if (!pending.promptDelivered) await this.adapter.send(existing, prompt) }
       else {
         if (this.adapter.preflight) await this.adapter.preflight(target, source.cwd)
         if (pending.cancelled) throw this._error('cancelled', '切り替えを取り消しました。')
@@ -83,14 +118,16 @@ export class AgentSwitchController {
         // host may update its runtime status as a side effect of this read.
         const result = await this.adapter.read(pending.runtime)
         if (result.errorCode) throw this._error(result.errorCode, result.reason || '切り替え先の会話を検証できませんでした。')
+        group.context.registerReceipt(result, prompt, pending.token)
         const status = this.adapter.status ? await this.adapter.status(pending.runtime) : { started: true }
         if (status?.errorCode) throw this._error(status.errorCode, status.reason || '切り替え先を開始できませんでした。')
         if (!status?.started && !result.ready && !result.text) { this._progress(group, pending, 'starting'); await new Promise(resolve => setTimeout(resolve, this.pollMs)); continue }
         this._progress(group, pending, 'waiting')
         if (result.ready && result.lastEventAt >= pending.startedAt && result.lastAssistantText?.split(/\r?\n/).some(line => line.trim() === `AC_HANDOFF_READY:${pending.token}`)) {
           if (pending.cancelled) break
+          group.context.merge(result)
           group.history.push({ agent: source.agent, text: source.text }); group.history = group.history.slice(-6)
-          group.active = pending.runtime; group.pending = null; group.progress = null; group.recovery = null
+          group.active = pending.runtime; group.pending = null; group.progress = null; group.recovery = null; group.parked.delete(target)
           activatedAt = Date.now(); this.adapter.activate(id, group.active); outcome = 'success'; return { ok: true }
         }
         await new Promise(resolve => setTimeout(resolve, this.pollMs))

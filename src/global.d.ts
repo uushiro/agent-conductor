@@ -55,7 +55,7 @@ export interface TabInfo {
 }
 
 export interface SavedSession {
-  tabs: Array<{ issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null; hadGemini: boolean; hadCodex: boolean; codexSessionId: string | null; model: string | null }>
+  tabs: Array<{ handoff?: unknown; issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null; hadGemini: boolean; hadCodex: boolean; codexSessionId: string | null; model: string | null }>
   activeIndex: number
 }
 
@@ -83,6 +83,12 @@ export interface ElectronAPI {
   sendAgentSwitchRecoveryInput: (tabId: string, data: string) => Promise<boolean>
   resizeAgentSwitchRecovery: (tabId: string, cols: number, rows: number) => Promise<boolean>
   getAgentSwitchMetrics: () => Promise<AgentSwitchAttempt[]>
+  getHandoffDraft: (tabId: string) => Promise<{ text: string; revision: number }>
+  setHandoffDraft: (tabId: string, text: string) => Promise<{ text: string; revision: number }>
+  getHandoffDraftDestination: (tabId: string) => Promise<{ ready: boolean; agent: 'claude' | 'codex' | null; token: string; reason?: string }>
+  submitHandoffDraft: (tabId: string, revision: number, destination: string, submit?: boolean) => Promise<{ ok: boolean; error?: string; draft?: { text: string; revision: number } }>
+  restoreHandoffSession: (tabId: string, lineage: unknown) => Promise<{ ok: boolean; errorCode?: string; reason?: string }>
+  getAgentSwitchContext: (tabId: string) => Promise<{ text: string; stats: { turnCount: number; omittedReceipts: number; truncated: boolean; droppedTurns: number; retainedUnknown: number }; ready: boolean; reason: string }>
   acknowledgeAgentSwitchRender: (tabId: string, renderToken: string) => void
   onTerminalReset: (callback: (tabId: string, data: string, renderToken?: string) => void) => () => void
   createTerminal: (cwd?: string, pendingSessionId?: string, pendingAgent?: 'claude' | 'codex') => Promise<string>
@@ -91,7 +97,7 @@ export interface ElectronAPI {
   >
   closeTerminal: (tabId: string) => void
   onTerminalData: (callback: (tabId: string, data: string) => void) => () => void
-  sendTerminalInput: (tabId: string, data: string) => void
+  sendTerminalInput: (tabId: string, data: string, requireUnswitched?: boolean) => void
   sendChoice: (tabId: string, num: string) => Promise<void>
   resizeTerminal: (tabId: string, cols: number, rows: number) => void
   getTerminalTitle: (tabId: string) => Promise<{ issue: string; detail: string; model: string | null; activeAgents: ActiveAgent[]; agentStatus: TabAgentStatus; promptChoices: PromptChoice[] }>

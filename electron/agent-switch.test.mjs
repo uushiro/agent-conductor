@@ -194,3 +194,59 @@ test('completed assistant acknowledgement may include hook explanations but not 
     assert.equal((await f.controller.switch('tab-1', 'codex')).ok, standalone)
   }
 })
+
+test('restored virtual parked lineage is resumed through the adapter instead of spawning a latest session', async () => {
+  const f = fixture()
+  let restored = 0, created = 0, sends = 0
+  const create = f.adapter.create
+  f.adapter.create = (...args) => { created += 1; return create(...args) }
+  f.adapter.send = async () => { sends += 1 }
+  f.adapter.restoreParked = async (_logical, descriptor, prompt, token) => {
+    restored += 1
+    assert.equal(descriptor.sessionId, 'parked-codex')
+    assert.equal(prompt, `AC_HANDOFF_READY:${token}`)
+    f.sessions.set('restored-codex', { agent: 'codex', cwd: '/project', ready: true, text: 'parked context', lastEventAt: Date.now(), lastAssistantText: prompt })
+    return { runtime: 'restored-codex' }
+  }
+  f.controller.restoreLineage('tab-1', { parked: [{ agent: 'codex', sessionId: 'parked-codex', cwd: '/project' }] })
+  assert.equal((await f.controller.switch('tab-1', 'codex')).ok, true)
+  assert.equal(restored, 1); assert.equal(created, 0); assert.equal(sends, 0, 'adapter owns safe direct initial prompt delivery'); assert.equal(f.controller.active('tab-1'), 'restored-codex')
+})
+
+test('exited restored parked runtime retries the exact descriptor instead of creating a replacement', async () => {
+  const f = fixture(); let restores = 0, creates = 0; const exited = new Set()
+  f.adapter.create = () => { creates += 1; return 'unexpected-new' }
+  f.adapter.exited = id => exited.has(id)
+  f.adapter.restoreParked = async (_id, descriptor, prompt) => {
+    restores += 1; assert.equal(descriptor.sessionId, 'parked-codex')
+    const runtime = `restored-${restores}`
+    f.sessions.set(runtime, { agent: 'codex', cwd: '/project', ready: true, text: 'parked', lastEventAt: Date.now(), lastAssistantText: restores === 1 ? '' : prompt })
+    if (restores === 1) exited.add(runtime)
+    return { runtime }
+  }
+  f.controller.restoreLineage('tab-1', { parked: [{ agent: 'codex', sessionId: 'parked-codex', cwd: '/project' }] })
+  assert.equal((await f.controller.switch('tab-1', 'codex')).errorCode, 'target_exited')
+  assert.equal((await f.controller.switch('tab-1', 'codex')).ok, true)
+  assert.equal(restores, 2); assert.equal(creates, 0)
+})
+
+test('parked descriptor survives timeout and cancel, while a ready recovery is reused', async () => {
+  const f = fixture(); let restores = 0, sends = 0
+  f.adapter.restoreParked = async (_id, descriptor) => {
+    restores += 1; assert.equal(descriptor.sessionId, 'parked-codex')
+    f.sessions.set('restored', { agent: 'codex', cwd: '/project', ready: true, text: 'parked', lastEventAt: Date.now(), lastAssistantText: '' })
+    return { runtime: 'restored' }
+  }
+  f.adapter.send = async (id, prompt) => { sends += 1; Object.assign(f.sessions.get(id), { lastEventAt: Date.now(), lastAssistantText: prompt }) }
+  f.controller.restoreLineage('tab-1', { parked: [{ agent: 'codex', sessionId: 'parked-codex', cwd: '/project' }] })
+  assert.equal((await f.controller.switch('tab-1', 'codex')).errorCode, 'timeout')
+  assert.ok(f.controller.groups.get('tab-1').parked.has('codex'))
+  assert.equal((await f.controller.switch('tab-1', 'codex')).ok, true)
+  assert.equal(restores, 1); assert.equal(sends, 1)
+
+  const g = fixture(); let cancelRestores = 0
+  g.adapter.restoreParked = async () => { cancelRestores += 1; g.sessions.set('restored', { agent: 'codex', cwd: '/project', ready: false, text: '', lastEventAt: 0, lastAssistantText: '' }); return { runtime: 'restored' } }
+  g.controller.restoreLineage('tab-1', { parked: [{ agent: 'codex', sessionId: 'parked-codex', cwd: '/project' }] })
+  const pending = g.controller.switch('tab-1', 'codex'); await new Promise(resolve => setTimeout(resolve, 5)); g.controller.cancel('tab-1')
+  assert.equal((await pending).errorCode, 'cancelled'); assert.equal(cancelRestores, 1); assert.ok(g.controller.groups.get('tab-1').parked.has('codex'))
+})

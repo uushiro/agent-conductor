@@ -2488,3 +2488,13 @@ html, body, #root {
   color: var(--accent-red);
   font-size: 12px;
 }
+.agent-switch-context-header { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.agent-switch-context-header button { border:1px solid var(--border); border-radius:4px; background:var(--bg-tertiary); color:var(--text-primary); font:inherit; padding:2px 6px; cursor:pointer; }
+.agent-switch-context-warning { color:var(--accent-yellow); }
+.agent-switch-context-stats { color:var(--text-muted); font-size:10px; }
+.agent-switch-context-text { margin:4px 0; white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; color:var(--text-secondary); }
+.agent-switch-history details, .agent-switch-metrics { margin-top:8px; }
+.agent-switch-history summary { cursor:pointer; color:var(--text-secondary); }
+
+.handoff-composer-target { color: var(--text-secondary); font-size: 11px; overflow-wrap: anywhere; padding-top: 3px; }
+.handoff-composer-error { color: var(--accent-red); font-size: 11px; }

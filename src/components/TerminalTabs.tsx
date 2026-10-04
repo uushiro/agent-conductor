@@ -167,7 +167,9 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       const claudeResumes: Array<{ tabId: string; sessionId: string | null; model: string | null }> = []
       const geminiResumes: Array<{ tabId: string }> = []
       const codexResumes: Array<{ tabId: string; sessionId: string | null }> = []
+      const handoffRestores: Array<{ tabId: string; lineage: unknown }> = []
       for (const saved of session.tabs) {
+        const handoff = (saved as any).handoff
         const pendingSessionId = saved.hadClaude
           ? saved.claudeSessionId ?? undefined
           : saved.hadCodex
@@ -181,7 +183,9 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         if (saved.issue) {
           await window.electronAPI.setTerminalIssue(tabId, saved.issue)
         }
-        if (saved.hadClaude) {
+        if (handoff) {
+          handoffRestores.push({ tabId, lineage: handoff })
+        } else if (saved.hadClaude) {
           claudeResumes.push({ tabId, sessionId: saved.claudeSessionId, model: saved.model ?? null })
         } else if (saved.hadGemini) {
           geminiResumes.push({ tabId })
@@ -204,6 +208,12 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       setTabs(restored)
       const activeIdx = Math.min(session.activeIndex, restored.length - 1)
       onActiveTabChange(restored[activeIdx]?.id || restored[0]?.id || '')
+
+      // Linked handoff sessions are validated and resumed only by main. Unlike
+      // legacy tabs they never fall back to a latest session in the renderer.
+      handoffRestores.forEach(({ tabId, lineage }, i) => setTimeout(() => {
+        window.electronAPI.restoreHandoffSession(tabId, lineage)
+      }, 500 + i * 1000))
 
       // Auto-resume Claude tabs (3000ms stagger to prevent cross-tab session mixing)
       // `model` here is saved.model = main's tabInfo.launchModel (explicit user choice only,

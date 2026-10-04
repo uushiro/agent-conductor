@@ -15,11 +15,12 @@ async function jsonl(file, rows) { await mkdir(path.dirname(file), { recursive: 
 test('reads a completed Claude transcript and omits tool payloads', async () => {
   const root = await home(); const file = path.join(root, '.claude/projects/-work-demo', `${claudeId}.jsonl`);
   await jsonl(file, [
-    { type: 'user', cwd, sessionId: claudeId, timestamp: 1, message: { role: 'user', content: 'safe question' } },
-    { type: 'assistant', timestamp: 2, message: { role: 'assistant', content: [{ type: 'text', text: 'safe answer' }, { type: 'tool_use', input: { secret: 'omit' } }], stop_reason: 'end_turn' } },
+    { type: 'user', uuid: 'claude-user', cwd, sessionId: claudeId, timestamp: 1, message: { role: 'user', content: 'safe question' } },
+    { type: 'assistant', uuid: 'claude-assistant', timestamp: 2, message: { role: 'assistant', content: [{ type: 'text', text: 'safe answer' }, { type: 'tool_use', input: { secret: 'omit' } }], stop_reason: 'end_turn' } },
   ]);
   const got = await readHandoffSession({ agent: 'claude', sessionId: claudeId, cwd, home: root });
   assert.equal(got.ready, true); assert.match(got.text, /safe answer/); assert.match(got.text, /Tool call omitted/); assert.doesNotMatch(got.text, /secret/);
+  assert.deepEqual(got.turns.map(turn => [turn.id, turn.role]), [['claude-user', 'user'], ['claude-assistant', 'assistant']]);
 });
 
 test('fails closed for malformed, wrong identity, sidechain, and unfinished Claude files', async () => {

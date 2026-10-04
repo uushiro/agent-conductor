@@ -1,7 +1,13 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  getHandoffDraft: (tabId: string) => ipcRenderer.invoke('terminal:handoff-draft', tabId),
+  setHandoffDraft: (tabId: string, text: string) => ipcRenderer.invoke('terminal:set-handoff-draft', tabId, text),
+  getHandoffDraftDestination: (tabId: string) => ipcRenderer.invoke('terminal:handoff-draft-destination', tabId),
+  submitHandoffDraft: (tabId: string, revision: number, destination: string, submit = true) => ipcRenderer.invoke('terminal:submit-handoff-draft', tabId, revision, destination, submit),
+  restoreHandoffSession: (tabId: string, lineage: unknown) => ipcRenderer.invoke('terminal:restore-handoff-session', tabId, lineage),
   // Same-visible-tab Agent Conductor handoff
+  getAgentSwitchContext: (tabId: string) => ipcRenderer.invoke('terminal:agent-switch-context', tabId),
   getAgentSwitchState: (tabId: string) => ipcRenderer.invoke('terminal:agent-switch-state', tabId),
   switchAgent: (tabId: string, target: 'claude' | 'codex') =>
     ipcRenderer.invoke('terminal:switch-agent', tabId, target) as Promise<{ ok: boolean; error?: string }>,
@@ -36,8 +42,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener('terminal:data', listener)
     }
   },
-  sendTerminalInput: (tabId: string, data: string) => {
-    ipcRenderer.send('terminal:input', tabId, data)
+  sendTerminalInput: (tabId: string, data: string, requireUnswitched = false) => {
+    ipcRenderer.send('terminal:input', tabId, data, requireUnswitched)
   },
   sendChoice: (tabId: string, num: string) =>
     ipcRenderer.invoke('terminal:send-choice', tabId, num) as Promise<void>,
