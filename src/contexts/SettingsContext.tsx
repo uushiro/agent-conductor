@@ -2,7 +2,7 @@ import { createContext, useContext, useState, useEffect, useRef } from 'react'
 
 export type Theme = 'dark' | 'light'
 
-export type DefaultAgent = 'claude' | 'gemini' | 'codex'
+export type DefaultAgent = 'claude' | 'gravity' | 'codex'
 
 export type InputSendMode = 'enter' | 'button' | 'cmd-enter'
 
@@ -24,6 +24,7 @@ interface Settings {
   accentColor: string
   customColors: string[]
   defaultAgent: DefaultAgent
+  gravityCommand: string
   fileTreeVisible: boolean
   fileTreeRoot: string | null
   fileTreePinned: boolean
@@ -46,6 +47,7 @@ const DEFAULTS: Settings = {
   accentColor: '#58a6ff',
   customColors: [],
   defaultAgent: 'claude',
+  gravityCommand: 'agy',
   fileTreeVisible: true,
   fileTreeRoot: null,
   fileTreePinned: false,
@@ -72,7 +74,14 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   // Show splash for at least 700ms so it's visible
   useEffect(() => {
     const finish = (saved?: Record<string, unknown> | null) => {
-      if (saved) setSettings({ ...DEFAULTS, ...saved })
+      if (saved) {
+        // Gemini CLI sessions cannot be resumed by Antigravity CLI. Keep the
+        // user's preference useful after the migration by selecting Gravity.
+        const migrated = saved.defaultAgent === 'gemini'
+          ? { ...saved, defaultAgent: 'gravity' }
+          : saved
+        setSettings({ ...DEFAULTS, ...migrated })
+      }
       initializedRef.current = true
       setLoaded(true)
       // Directly remove splash from DOM as a reliable fallback

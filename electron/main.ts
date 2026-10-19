@@ -10,7 +10,7 @@ import { HandoffDrafts } from './handoff-draft.mjs'
 import { findSessionNotes } from './handoff-notes.mjs'
 import { execFile } from 'node:child_process'
 import { readClaudeSessionTitle } from './claude-session-title.mjs'
-import { SESSION_SCHEMA_VERSION, consumeOsc7, exactClaudeSessionId, exactCodexSessionId, mergeRestoreSnapshot, savedResumeCommand, selectedIndex } from './session-resume.mjs'
+import { SESSION_SCHEMA_VERSION, consumeOsc7, exactClaudeSessionId, exactCodexSessionId, exactGravityConversationId, mergeRestoreSnapshot, savedResumeCommand, selectedIndex, uniquePendingGravityTab } from './session-resume.mjs'
 import { codexMetaFromSessionRecord, isInteractiveCodexMeta as isInteractiveCodexMetaRecord, isSubagentCodexMeta, resolveCodexSessionLineage } from './codex-session-lineage.mjs'
 
 // node-pty is a native module — require it
@@ -54,7 +54,7 @@ type TabAgentStatus = 'error' | 'running' | 'attention' | 'waiting' | 'done' | '
 const tabInfo = new Map<string, {
   cwd: string; proc: string; issue: string; latestInput: string
   claudeSessionId: string | null; claudeResumeParentId: string | null; hadClaude: boolean
-  hadGemini: boolean; geminiSessionFile: string | null; hadCodex: boolean; codexSessionId: string | null; resuming: boolean
+  hadGravity: boolean; gravityConversationId: string | null; hadCodex: boolean; codexSessionId: string | null; resuming: boolean
   // Display model (tab badge). Last-wins from any source: --model input parse,
   // stdout startup banner, hook-inherited markers. NEVER used to build a launch command.
   model: string | null
@@ -90,7 +90,8 @@ interface ClosedTabEntry {
   cwd: string
   claudeSessionId: string | null
   codexSessionId: string | null
-  agent: 'claude' | 'gemini' | 'codex'
+  gravityConversationId: string | null
+  agent: 'claude' | 'gravity' | 'codex'
   closedAt: number
   // Launch-flag model (tabInfo.launchModel), replayed as `claude --model X` on reopen.
   model: string | null
@@ -102,7 +103,8 @@ const tabLastOutput = new Map<string, string>()
 const tabLastOutputAt = new Map<string, number>()
 const tabLastInputAt = new Map<string, number>()
 const tabSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
-const tabGeminiSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
+const tabGravitySessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
+const tabGravitySessionWatcherCwds = new Map<string, string>()
 const tabCodexSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
 // tabId → timestamp until which [[SEND:]] detection is suppressed (resume replay window)
 const tabResumeCooldown = new Map<string, number>()
@@ -319,13 +321,13 @@ function resolveTabByName(name: string, excludeTabId: string): string | null {
   return null
 }
 
-// A tab counts as "AI agent running" when any agent (Claude/Gemini/Codex) was
+// A tab counts as "AI agent running" when any agent (Claude/Gravity/Codex) was
 // launched in it and its foreground process has not returned to a plain shell.
 // SECURITY: SEND delivery must be gated on this — injecting into a plain shell
 // would execute the message body as a shell command.
-function isAgentTab(info: { proc: string; hadClaude: boolean; hadGemini: boolean; hadCodex: boolean } | undefined): boolean {
+function isAgentTab(info: { proc: string; hadClaude: boolean; hadGravity: boolean; hadCodex: boolean } | undefined): boolean {
   if (!info) return false
-  return (info.hadClaude || info.hadGemini || info.hadCodex) && info.proc !== '' && !SHELLS.has(info.proc)
+  return (info.hadClaude || info.hadGravity || info.hadCodex) && info.proc !== '' && !SHELLS.has(info.proc)
 }
 
 // Inject a message into the destination PTY via bracketed paste.
@@ -629,7 +631,7 @@ const RED_SGR_RE = /\x1b\[(?:[0-9;]*;)?(?:31|91|41|101|[34]8;5;(?:52|88|12[45]|1
 const TRUECOLOR_SGR_RE = /\x1b\[[0-9;]*[34]8;2;(\d{1,3});(\d{1,3});(\d{1,3})/g
 
 // True when a raw (ANSI-included) line carries a red-ish SGR color — the shape
-// Claude Code / Gemini / Codex TUIs actually use to render error banners. Prose
+// Claude Code / Gravity / Codex TUIs actually use to render error banners. Prose
 // merely *mentioning* errors is never colored red, so this is the strongest
 // false-positive filter available.
 function lineHasRedAnsi(rawLine: string): boolean {
@@ -699,7 +701,10 @@ interface SavedTab {
   cwd: string
   hadClaude: boolean
   claudeSessionId: string | null
-  hadGemini: boolean
+  hadGravity: boolean
+  gravityConversationId?: string | null
+  // v4 and earlier only; migrated to a fresh Gravity conversation on load.
+  hadGemini?: boolean
   geminiSessionFile?: string | null
   hadCodex: boolean
   codexSessionId: string | null
@@ -730,6 +735,15 @@ const SESSION_FILE = path.join(app.getPath('userData'), IS_DEV ? 'session-dev.js
 const SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json')
 const SESSION_TITLE_OVERRIDES_FILE = path.join(app.getPath('userData'), 'session-title-overrides.json')
 const claudeSessionTitleCache = new Map<string, { mtime: number; size: number; title: string | null }>()
+
+function gravityCliCommand(): string {
+  try {
+    const settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8')) as { gravityCommand?: unknown }
+    const command = typeof settings.gravityCommand === 'string' ? settings.gravityCommand.trim() : ''
+    if (/^[a-z0-9_./~-]+$/i.test(command)) return command
+  } catch { /* default below */ }
+  return 'agy'
+}
 
 function cachedClaudeSessionTitle(filePath: string, stat: fs.Stats): string | null {
   const cached = claudeSessionTitleCache.get(filePath)
@@ -781,8 +795,8 @@ function saveSession() {
         cwd: preserveFailedRestore ? savedDescriptor!.cwd : info.cwd || HOME,
         hadClaude,
         claudeSessionId,
-        hadGemini: preserveFailedRestore ? savedDescriptor!.hadGemini : info.hadGemini,
-        geminiSessionFile: preserveFailedRestore ? savedDescriptor!.geminiSessionFile ?? null : info.hadGemini ? info.geminiSessionFile : null,
+        hadGravity: preserveFailedRestore ? savedDescriptor!.hadGravity : info.hadGravity,
+        gravityConversationId: preserveFailedRestore ? savedDescriptor!.gravityConversationId ?? null : info.hadGravity ? info.gravityConversationId : null,
         hadCodex: preserveFailedRestore ? savedDescriptor!.hadCodex : info.hadCodex,
         codexSessionId: (preserveFailedRestore ? savedDescriptor!.hadCodex : info.hadCodex) ? exactCodexSessionId(preserveFailedRestore ? savedDescriptor : info) : null,
         // Persist the launch flag, not the display model (see tabInfo.launchModel).
@@ -836,6 +850,21 @@ function loadSession(): SavedSession | null {
       if ((session.schemaVersion ?? 1) < 2) {
         for (const tab of session.tabs) tab.model = null
       }
+      if ((session.schemaVersion ?? 1) < 5) {
+        if (session.tabs.some(tab => tab.hadGemini)) {
+          const backup = `${SESSION_FILE}.pre-gravity-v5`
+          try { if (!fs.existsSync(backup)) fs.copyFileSync(SESSION_FILE, backup) } catch { /* migration can continue; source Gemini files are untouched */ }
+        }
+        for (const tab of session.tabs) {
+          if (tab.hadGemini) {
+            tab.hadGravity = true
+            tab.gravityConversationId = null
+          }
+          tab.hadGemini = false
+          delete tab.geminiSessionFile
+        }
+      }
+      for (const tab of session.tabs) tab.hadGravity = !!tab.hadGravity
       return session
     }
   } catch { /* ignore */ }
@@ -926,89 +955,67 @@ function startSessionWatch(tabId: string, cwd: string) {
   }, 60000)
 }
 
-// --- Gemini session helpers ---
+// --- Gravity (Antigravity CLI / agy) session helpers ---
 
-// Gemini stores sessions in ~/.gemini/tmp/<project-dirname>/chats/session-*.json
-function geminiSessionDir(cwd: string): string {
-  return path.join(HOME, '.gemini', 'tmp', path.basename(cwd) || 'home', 'chats')
+const GRAVITY_LAST_CONVERSATIONS = path.join(HOME, '.gemini', 'antigravity-cli', 'cache', 'last_conversations.json')
+const GRAVITY_CONVERSATIONS_DIR = path.join(HOME, '.gemini', 'antigravity-cli', 'conversations')
+const GRAVITY_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function gravityConversationExists(id: string | null): boolean {
+  return !!id && GRAVITY_UUID_RE.test(id) && fs.existsSync(path.join(GRAVITY_CONVERSATIONS_DIR, `${id}.db`))
 }
 
-// Get the most recently modified Gemini session file for a cwd
-function getLastGeminiSessionFile(cwd: string): string | null {
-  const dir = geminiSessionDir(cwd)
+function getLastGravityConversationId(cwd: string): string | null {
   try {
-    const files = fs.readdirSync(dir)
-      .filter((f: string) => f.startsWith('session-') && f.endsWith('.json'))
-      .map((f: string) => ({ file: f, mtime: fs.statSync(path.join(dir, f)).mtimeMs }))
-      .sort((a: { mtime: number }, b: { mtime: number }) => b.mtime - a.mtime)
-    if (files.length > 0) return path.join(dir, (files[0] as { file: string }).file)
-  } catch { /* ignore */ }
-  return null
+    const conversations = JSON.parse(fs.readFileSync(GRAVITY_LAST_CONVERSATIONS, 'utf-8')) as Record<string, unknown>
+    const normalizedCwd = path.resolve(cwd)
+    const id = conversations[normalizedCwd]
+    return typeof id === 'string' && gravityConversationExists(id) ? id : null
+  } catch { return null }
 }
 
-// Read the last Gemini response text from a session JSON file
-function getLastGeminiSessionText(sessionFile: string | null): string {
-  if (!sessionFile) return ''
-  try {
-    const raw = fs.readFileSync(sessionFile, 'utf-8')
-    const session = JSON.parse(raw)
-    const messages: Array<{ type: string; content: unknown }> = session.messages || []
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i]
-      if (msg.type === 'gemini' && typeof msg.content === 'string' && msg.content.trim()) {
-        return msg.content.slice(0, 120).replace(/\n+/g, ' ').trim()
-      }
-    }
-  } catch { /* ignore */ }
-  return ''
-}
-
-// Watch for a new Gemini session file created after Gemini starts
-function startGeminiSessionWatch(tabId: string, cwd: string) {
-  const existing = tabGeminiSessionWatchers.get(tabId)
-  if (existing) { clearInterval(existing); tabGeminiSessionWatchers.delete(tabId) }
-
-  const sessionDir = geminiSessionDir(cwd)
-  let knownFiles: Set<string>
-  try {
-    knownFiles = new Set(fs.readdirSync(sessionDir).filter((f: string) => f.startsWith('session-') && f.endsWith('.json')))
-  } catch { knownFiles = new Set() }
-  const startTime = Date.now()
-
+// Antigravity records the newest conversation ID per exact workspace. Capture
+// the previous ID before launch and bind only a changed, existing UUID so two
+// unrelated historical conversations are never attached to a fresh tab.
+function startGravitySessionWatch(tabId: string, cwd: string) {
+  stopGravitySessionWatch(tabId)
+  const normalizedCwd = path.resolve(cwd)
+  const previousId = getLastGravityConversationId(normalizedCwd)
   const watcher = setInterval(() => {
-    try {
-      const current = fs.readdirSync(sessionDir).filter((f: string) => f.startsWith('session-') && f.endsWith('.json'))
-      const newFiles = current
-        .filter((f: string) => !knownFiles.has(f))
-        .map((f: string) => {
-          try { return { file: f, mtime: fs.statSync(path.join(sessionDir, f)).mtimeMs } }
-          catch { return null }
-        })
-        .filter((e): e is { file: string; mtime: number } => e !== null && e.mtime >= startTime - 500)
-        .sort((a, b) => a.mtime - b.mtime)
-      if (newFiles.length === 1) {
-        const sessionFile = path.join(sessionDir, newFiles[0].file)
-        const info = tabInfo.get(tabId)
-        if (info) { info.geminiSessionFile = sessionFile; tabInfo.set(tabId, info) }
-        clearInterval(watcher)
-        tabGeminiSessionWatchers.delete(tabId)
-      } else if (newFiles.length > 1) {
-        console.warn(`[gemini-session] refused ambiguous same-cwd candidates for ${tabId} (${cwd})`)
-      }
-    } catch { /* ignore */ }
+    const id = getLastGravityConversationId(normalizedCwd)
+    if (!id || id === previousId) return
+    const owner = uniquePendingGravityTab(tabGravitySessionWatcherCwds, normalizedCwd)
+    if (owner !== tabId) {
+      const ambiguous = [...tabGravitySessionWatcherCwds]
+        .filter(([, pendingCwd]) => pendingCwd === normalizedCwd)
+        .map(([pendingTabId]) => pendingTabId)
+      console.warn(`[gravity-session] refused ambiguous same-cwd candidate for ${ambiguous.join(', ')} (${normalizedCwd})`)
+      for (const pendingTabId of ambiguous) stopGravitySessionWatch(pendingTabId)
+      return
+    }
+    const info = tabInfo.get(tabId)
+    if (info) { info.gravityConversationId = id; tabInfo.set(tabId, info) }
+    stopGravitySessionWatch(tabId)
   }, 1000)
-
-  tabGeminiSessionWatchers.set(tabId, watcher)
+  tabGravitySessionWatchers.set(tabId, watcher)
+  tabGravitySessionWatcherCwds.set(tabId, normalizedCwd)
   setTimeout(() => {
-    const w = tabGeminiSessionWatchers.get(tabId)
-    if (w === watcher) { clearInterval(watcher); tabGeminiSessionWatchers.delete(tabId) }
+    const w = tabGravitySessionWatchers.get(tabId)
+    if (w === watcher) stopGravitySessionWatch(tabId)
   }, 60000)
+}
+
+function stopGravitySessionWatch(tabId: string) {
+  const watcher = tabGravitySessionWatchers.get(tabId)
+  if (watcher) clearInterval(watcher)
+  tabGravitySessionWatchers.delete(tabId)
+  tabGravitySessionWatcherCwds.delete(tabId)
 }
 
 // --- Codex session helpers ---
 
 // Codex stores rollouts in ~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl.
-// Unlike claude/gemini, the directory tree is NOT split by cwd — all projects' sessions
+// Unlike Claude/Gravity, the directory tree is NOT split by cwd — all projects' sessions
 // share the same date directory, so every candidate file's first-line
 // session_meta.payload.cwd must be checked against the tab's cwd before use.
 const CODEX_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -1511,16 +1518,16 @@ function extractClaudeAction(raw: string): string {
       return arg ? `${toolName}: ${arg}` : toolName
     }
 
-    // Gemini tool format: ServerName[method](args) e.g. "Claude in Chrome[navigate](url)"
-    const geminiToolMatch = line.match(/^[●•⠿⠸⠼⠦⠧⠇⠏\s]*(.+?)\[(\w+)\](?:\(([^)]*)\))?$/)
-    if (geminiToolMatch && geminiToolMatch[1].trim().length > 0 && geminiToolMatch[1].trim().length < 50) {
-      const server = geminiToolMatch[1].trim()
-      const method = geminiToolMatch[2]
-      const arg = geminiToolMatch[3] ? `: ${geminiToolMatch[3].slice(0, 40)}` : ''
+    // Gravity tool format: ServerName[method](args)
+    const gravityToolMatch = line.match(/^[●•⠿⠸⠼⠦⠧⠇⠏\s]*(.+?)\[(\w+)\](?:\(([^)]*)\))?$/)
+    if (gravityToolMatch && gravityToolMatch[1].trim().length > 0 && gravityToolMatch[1].trim().length < 50) {
+      const server = gravityToolMatch[1].trim()
+      const method = gravityToolMatch[2]
+      const arg = gravityToolMatch[3] ? `: ${gravityToolMatch[3].slice(0, 40)}` : ''
       return `${server}[${method}]${arg}`
     }
 
-    // Thinking/processing animations (Claude and Gemini variants)
+    // Thinking/processing animations (Claude and Gravity variants)
     if (/Kneading|Thinking|Levitating|Brewing|Brewed|Cooked|Baking|Distilling/i.test(line)) {
       return 'Thinking...'
     }
@@ -1553,7 +1560,7 @@ function autoTitle(input: string): string {
 
 function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
   if (ptyProcesses.get(id) !== ptyProcess) return
-  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGemini: false, geminiSessionFile: null as string | null, hadCodex: false, codexSessionId: null as string | null, resuming: false, model: null as string | null, launchModel: null as string | null, activeAgents: [] as ActiveAgent[], pendingSessionTitle: null as string | null }
+  const info = tabInfo.get(id) || { cwd: '', proc: '', issue: '', latestInput: '', claudeSessionId: null as string | null, claudeResumeParentId: null as string | null, hadClaude: false, hadGravity: false, gravityConversationId: null as string | null, hadCodex: false, codexSessionId: null as string | null, resuming: false, model: null as string | null, launchModel: null as string | null, activeAgents: [] as ActiveAgent[], pendingSessionTitle: null as string | null }
   const prevProc = info.proc
 
   try {
@@ -1567,7 +1574,7 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
     if ((prevProc === '' || SHELLS.has(prevProc)) && !SHELLS.has(info.proc) && info.proc !== '') {
       // Shell → agent: mark appropriate flag (session watch started at input time)
       if (info.proc === 'claude') info.hadClaude = true
-      if (info.proc === 'gemini') info.hadGemini = true
+      if (info.proc === 'agy') info.hadGravity = true
       if (info.proc === 'codex') info.hadCodex = true
       info.resuming = false
     } else if (prevProc !== '' && !SHELLS.has(prevProc) && SHELLS.has(info.proc)) {
@@ -1587,9 +1594,9 @@ function updateTabInfo(id: string, ptyProcess: ReturnType<typeof pty.spawn>) {
         info.launchModel = null
         info.pendingSessionTitle = null
       }
-      if (prevProc === 'gemini' && !preserveFailedRestore) {
-        info.hadGemini = false
-        info.geminiSessionFile = null
+      if (prevProc === 'agy' && !preserveFailedRestore) {
+        info.hadGravity = false
+        info.gravityConversationId = null
       }
       if (prevProc === 'codex' && !preserveFailedRestore) {
         info.hadCodex = false
@@ -1667,7 +1674,7 @@ function spawnPty(cwd?: string, handoff?: { agent: ResumableAgent; prompt: strin
   })
 
   ptyProcesses.set(id, ptyProcess)
-  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGemini: false, geminiSessionFile: null, hadCodex: false, codexSessionId: null, resuming: false, model: null, launchModel: null, activeAgents: [], pendingSessionTitle: null })
+  tabInfo.set(id, { cwd: initialCwd, proc: '', issue: '', latestInput: '', claudeSessionId: null, claudeResumeParentId: null, hadClaude: false, hadGravity: false, gravityConversationId: null, hadCodex: false, codexSessionId: null, resuming: false, model: null, launchModel: null, activeAgents: [], pendingSessionTitle: null })
   if (!handoff) tabOrder.push(id)
   else {
     const info = tabInfo.get(id)!
@@ -1965,11 +1972,12 @@ function recoveryRuntime(tabId: string) {
 
 
 function releaseHandoffRuntime(id: string) {
-  for (const timers of [tabTimers, tabSessionWatchers, tabCodexSessionWatchers, tabGeminiSessionWatchers]) {
+  for (const timers of [tabTimers, tabSessionWatchers, tabCodexSessionWatchers, tabGravitySessionWatchers]) {
     const timer = timers.get(id)
     if (timer) clearInterval(timer)
     timers.delete(id)
   }
+  tabGravitySessionWatcherCwds.delete(id)
   const resumeTimer = tabResumeWatch.get(id)
   if (resumeTimer) clearTimeout(resumeTimer)
   tabResumeWatch.delete(id)
@@ -2262,7 +2270,7 @@ function createWindow() {
   // Create a new terminal tab (optional cwd)
   // pendingSessionId pre-marks a Resume-created tab with its agent/session so
   // title sync and saveSession() work even before the CLI process starts.
-  ipcMain.handle('terminal:create', (event, cwd?: string, pendingSessionId?: string, pendingAgent: ResumableAgent | 'gemini' = 'claude', restoreIndex?: number) => {
+  ipcMain.handle('terminal:create', (event, cwd?: string, pendingSessionId?: string, pendingAgent: ResumableAgent | 'gravity' = 'claude', restoreIndex?: number) => {
     if (!mainWindow || event.sender?.isDestroyed?.()) throw new Error('ウィンドウが閉じられたため端末の作成を中止しました。')
     const saved = Number.isInteger(restoreIndex) && restoreIndex! >= 0 ? loadedSessionSnapshot?.tabs[restoreIndex!] : undefined
     let savedForRestore = saved
@@ -2295,28 +2303,28 @@ function createWindow() {
       info.hadClaude = savedForRestore.hadClaude
       info.claudeSessionId = savedForRestore.claudeSessionId
       info.claudeResumeParentId = savedForRestore.claudeSessionId
-      info.hadGemini = savedForRestore.hadGemini
-      info.geminiSessionFile = savedForRestore.geminiSessionFile ?? null
+      info.hadGravity = savedForRestore.hadGravity
+      info.gravityConversationId = savedForRestore.gravityConversationId ?? null
       info.hadCodex = savedForRestore.hadCodex
       info.codexSessionId = savedForRestore.codexSessionId
       info.launchModel = savedForRestore.model ?? null
       info.model = savedForRestore.model ?? null
-      info.resuming = !!(savedForRestore.hadClaude || savedForRestore.hadGemini || savedForRestore.hadCodex)
+      info.resuming = !!(savedForRestore.hadClaude || savedForRestore.hadGravity || savedForRestore.hadCodex)
       if (cwdFailure) info.cwd = savedForRestore.cwd
       tabInfo.set(id, info)
       if (cwdFailure) setResumeError(id, `作業フォルダ ${savedForRestore.cwd} を開けません。フォルダを復元してから再試行してください。`)
-    } else if (pendingSessionId || pendingAgent === 'codex' || pendingAgent === 'gemini') {
+    } else if (pendingSessionId || pendingAgent === 'codex' || pendingAgent === 'gravity') {
       if (pendingAgent === 'codex') {
         info.hadCodex = true
         info.codexSessionId = isCodexUuid(pendingSessionId || '') ? pendingSessionId! : null
-      } else if (pendingAgent === 'gemini') {
-        info.hadGemini = true
-        info.geminiSessionFile = pendingSessionId || null
+      } else if (pendingAgent === 'gravity') {
+        info.hadGravity = true
+        info.gravityConversationId = isCodexUuid(pendingSessionId || '') ? pendingSessionId! : null
       } else if (pendingSessionId || Number.isInteger(restoreIndex)) {
         info.hadClaude = true
         info.claudeResumeParentId = isCodexUuid(pendingSessionId || '') ? pendingSessionId! : null
       }
-      info.resuming = !!(info.hadClaude || info.hadCodex || info.hadGemini)
+      info.resuming = !!(info.hadClaude || info.hadCodex || info.hadGravity)
       tabInfo.set(id, info)
     }
     return id
@@ -2357,17 +2365,16 @@ function createWindow() {
         }
       }
     }
-    const result = savedResumeCommand(resumeInfo, HOME)
+    const result = savedResumeCommand(resumeInfo, HOME, gravityCliCommand())
     if (!result.ok) { setResumeError(tabId, result.reason); return result }
     if (!result.command) { info.resuming = false; return { ok: true } }
     if (result.agent === 'claude' && !sessionHasConversation(exactClaudeSessionId(resumeInfo)!, resumeInfo.cwd || HOME)) {
       const reason = '保存されたClaudeの会話ファイルが見つからないか、会話内容を読み取れません。'
       setResumeError(tabId, reason); return { ok: false, reason }
     }
-    if (result.agent === 'gemini') {
-      try { if (!fs.statSync(resumeInfo.geminiSessionFile!).isFile()) throw new Error('not a file') }
-      catch {
-        const reason = '保存されたGeminiのセッションファイルが見つかりません。'
+    if (result.agent === 'gravity' && resumeInfo.gravityConversationId) {
+      if (!gravityConversationExists(exactGravityConversationId(resumeInfo))) {
+        const reason = '保存されたGravityの会話が見つかりません。'
         setResumeError(tabId, reason); return { ok: false, reason }
       }
     }
@@ -2396,6 +2403,7 @@ function createWindow() {
       if (current?.resuming) setResumeError(tabId, '会話の起動完了を確認できませんでした。タブの出力とCLIの認証状態を確認してください。')
       else if (!tabResumeErrors.has(tabId)) tabSavedResumeDescriptors.delete(tabId)
     }, 30000))
+    if (result.agent === 'gravity' && !resumeInfo.gravityConversationId) startGravitySessionWatch(tabId, resumeInfo.cwd || HOME)
     proc.write(result.command)
     return { ok: true }
   })
@@ -2430,11 +2438,6 @@ function createWindow() {
         if (!text && info.claudeResumeParentId && info.claudeResumeParentId !== sessionId) {
           text = getLastSessionText(info.claudeResumeParentId, cwd)
         }
-        if (text) result.detail = text
-      } else if (info.hadGemini) {
-        const cwd = info.cwd || HOME
-        const sessionFile = info.geminiSessionFile
-        const text = getLastGeminiSessionText(sessionFile)
         if (text) result.detail = text
       }
     }
@@ -2475,7 +2478,7 @@ function createWindow() {
         const active = (now - lastOutputAt) < 3000
         const isAgentRunning = isAgentTab(info)
         const isClaudeRunning = isAgentRunning && !!info?.hadClaude
-        const isGeminiRunning = isAgentRunning && !!info?.hadGemini
+        const isGravityRunning = isAgentRunning && !!info?.hadGravity
         const isCodexRunning = isAgentRunning && !!info?.hadCodex
         const isThinking = isAgentRunning && active
         // Compute (and prune expired done entries) BEFORE reading info.activeAgents below
@@ -2498,10 +2501,9 @@ function createWindow() {
           if (!lastOutput && info!.claudeResumeParentId && info!.claudeResumeParentId !== sessionId) {
             lastOutput = getLastSessionText(info!.claudeResumeParentId, cwd)
           }
-        } else if (isGeminiRunning) {
-          // Gemini idle — show last response from session JSON
-          const cwd = info!.cwd || HOME
-          lastOutput = getLastGeminiSessionText(info!.geminiSessionFile)
+        } else if (isGravityRunning) {
+          // Gravity stores protobuf steps in SQLite; retain the final visible PTY line.
+          lastOutput = extractLastLine(tabLastOutput.get(id) || '')
         } else {
           lastOutput = extractLastLine(tabLastOutput.get(id) || '')
         }
@@ -2564,8 +2566,9 @@ function createWindow() {
     tabResumeWatch.clear()
     for (const w of tabSessionWatchers.values()) clearInterval(w)
     tabSessionWatchers.clear()
-    for (const w of tabGeminiSessionWatchers.values()) clearInterval(w)
-    tabGeminiSessionWatchers.clear()
+    for (const w of tabGravitySessionWatchers.values()) clearInterval(w)
+    tabGravitySessionWatchers.clear()
+    tabGravitySessionWatcherCwds.clear()
     for (const w of tabCodexSessionWatchers.values()) clearInterval(w)
     tabCodexSessionWatchers.clear()
     tabOrder.length = 0
@@ -2586,19 +2589,19 @@ function createWindow() {
       if (sessionId && sessionHasConversation(sessionId, closingInfo.cwd || HOME)) {
         closedTabsHistory.unshift({
           issue: closingInfo.issue, cwd: closingInfo.cwd || HOME,
-          claudeSessionId: sessionId, codexSessionId: null, agent: 'claude', closedAt: Date.now(),
+          claudeSessionId: sessionId, codexSessionId: null, gravityConversationId: null, agent: 'claude', closedAt: Date.now(),
           // Reopen from history replays `claude --model X --resume …`, so this must be
           // the explicit launch flag, not the banner-detected display model.
           model: closingInfo.launchModel,
         })
         if (closedTabsHistory.length > 10) closedTabsHistory.pop()
       }
-    } else if (closingInfo?.hadGemini) {
-      const sessionFile = closingInfo.geminiSessionFile || getLastGeminiSessionFile(closingInfo.cwd || HOME)
-      if (sessionFile) {
+    } else if (closingInfo?.hadGravity) {
+      const gravityConversationId = exactGravityConversationId(closingInfo)
+      if (gravityConversationId) {
         closedTabsHistory.unshift({
           issue: closingInfo.issue, cwd: closingInfo.cwd || HOME,
-          claudeSessionId: null, codexSessionId: null, agent: 'gemini', closedAt: Date.now(),
+          claudeSessionId: null, codexSessionId: null, gravityConversationId, agent: 'gravity', closedAt: Date.now(),
           model: null,
         })
         if (closedTabsHistory.length > 10) closedTabsHistory.pop()
@@ -2609,7 +2612,7 @@ function createWindow() {
         : getLastCodexSessionId(closingInfo.cwd || HOME)
       closedTabsHistory.unshift({
         issue: closingInfo.issue, cwd: closingInfo.cwd || HOME,
-        claudeSessionId: null, codexSessionId, agent: 'codex', closedAt: Date.now(),
+        claudeSessionId: null, codexSessionId, gravityConversationId: null, agent: 'codex', closedAt: Date.now(),
         model: null,
       })
       if (closedTabsHistory.length > 10) closedTabsHistory.pop()
@@ -2663,7 +2666,7 @@ function createWindow() {
   ipcMain.handle('terminal:get-tab-has-claude', (_event, tabId: string) => {
     tabId = switchController.active(tabId)
     const info = tabInfo.get(tabId)
-    return !!(info?.hadClaude || info?.hadGemini || info?.hadCodex)
+    return !!(info?.hadClaude || info?.hadGravity || info?.hadCodex)
   })
 
   // Get recently closed tab history (for restore menu)
@@ -2673,7 +2676,7 @@ function createWindow() {
 
   // Remove an entry from closed history after restore
   ipcMain.on('terminal:remove-closed-history', (_event: Electron.IpcMainEvent, sessionId: string) => {
-    const idx = closedTabsHistory.findIndex((e) => e.claudeSessionId === sessionId || e.codexSessionId === sessionId)
+    const idx = closedTabsHistory.findIndex((e) => e.claudeSessionId === sessionId || e.codexSessionId === sessionId || e.gravityConversationId === sessionId)
     if (idx !== -1) closedTabsHistory.splice(idx, 1)
   })
 
@@ -2739,6 +2742,9 @@ function createWindow() {
       if (inputInfo?.hadCodex && !inputInfo.codexSessionId && !tabCodexSessionWatchers.has(tabId)) {
         startCodexSessionWatch(tabId, inputInfo.cwd || HOME)
       }
+      if (inputInfo?.hadGravity && !inputInfo.gravityConversationId && !tabGravitySessionWatchers.has(tabId)) {
+        startGravitySessionWatch(tabId, inputInfo.cwd || HOME)
+      }
     }
     if (proc && isEnter && inputInfo && (!inputInfo.proc || SHELLS.has(inputInfo.proc))) {
       const buffered = tabInputBuf.get(tabId) || ''
@@ -2768,19 +2774,18 @@ function createWindow() {
       tabInputUncertain.delete(tabId)
 
       if (isShell) {
-        // Detect "gemini" command
-        if (/^gemini(\s|$)/.test(input)) {
-          info.hadGemini = true
+        // Detect Gravity (Antigravity CLI) command.
+        const commandName = path.basename(input.split(/\s+/, 1)[0] || '')
+        const configuredGravityName = path.basename(gravityCliCommand())
+        if (commandName === 'agy' || commandName === configuredGravityName) {
+          info.hadGravity = true
           tabInfo.set(tabId, info)
-          if (/--session-file\s+/.test(input)) {
-            // Exact saved file is already attached to this tab. A new-file
-            // watcher could bind another same-cwd tab's session.
+          const conversationMatch = input.match(/--conversation\s+([0-9a-f-]{36})\b/i)
+          if (conversationMatch && isCodexUuid(conversationMatch[1])) {
+            info.gravityConversationId = conversationMatch[1]
             tabResumeCooldown.set(tabId, Date.now() + RESUME_COOLDOWN_MS)
           } else {
-            startGeminiSessionWatch(tabId, info.cwd || HOME)
-          }
-          if (/--resume/.test(input)) {
-            tabResumeCooldown.set(tabId, Date.now() + RESUME_COOLDOWN_MS)
+            startGravitySessionWatch(tabId, info.cwd || HOME)
           }
         }
 

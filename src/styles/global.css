@@ -1598,6 +1598,22 @@ html, body, #root {
   flex-shrink: 0;
 }
 
+.settings-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.settings-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .settings-toggle-group {
   display: flex;
   gap: 4px;

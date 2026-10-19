@@ -1,20 +1,22 @@
 # Agent Conductor
 
-Claude Code / Gemini CLI のマルチセッション管理デスクトップアプリ。非エンジニアでもターミナルを意識せず AI エージェントを使えることを目指して設計されています。
+Claude Code / Antigravity CLI（Gravity）のマルチセッション管理デスクトップアプリ。非エンジニアでもターミナルを意識せず AI エージェントを使えることを目指して設計されています。
 
 複数の AI エージェントセッションをタブで並列管理し、セッションの自動保存・復元、タスク管理、ファイルツリーを統合した Electron アプリケーションです。
 
-> **前提**: このアプリは **Claude Code CLI** や **Gemini CLI** がインストール済みの環境で使うことを前提としています。アプリ自体にはAIエージェントは含まれておらず、ターミナル上でCLIを起動・管理するラッパーです。
+> **前提**: このアプリは **Claude Code CLI** や **Antigravity CLI（`agy`）** がインストール済みの環境で使うことを前提としています。GravityでGemini APIを使う場合は `~/.gemini/antigravity-cli/settings.json` の `modelProvider` を `gemini` にし、`GEMINI_API_KEY` をCLIの実行環境へ渡します。アプリ自体にはAIエージェントやAPIキーは含まれません。
+
+Gravityをラッパー経由で起動する場合は、Settingsの `Gravity command` にラッパーのコマンド名または絶対パスを指定できます。値は単一の実行ファイルに限定され、シェル演算子は受け付けません。
 
 ## 機能一覧
 
 ### タブ管理
-- **マルチタブ**: Claude / Gemini / 素のターミナルをタブで並列起動
-- **タブ追加**: 右上の `+` ボタンから Claude / Gemini / Terminal を選択
+- **マルチタブ**: Claude / Gravity / Codex / 素のターミナルをタブで並列起動
+- **タブ追加**: 右上の `+` ボタンから Claude / Gravity / Codex / Terminal を選択
 - **タブ名の自動生成**: 最初の入力から末尾の動詞・助詞を除去して短いタイトルを自動生成
 - **タブ名編集**: タブをダブルクリックで名前を変更
 - **タブ並べ替え**: タブをドラッグで順序変更
-- **タブ閉じる**: Claude/Gemini セッションがある場合は確認ダイアログ表示
+- **タブ閉じる**: Claude/Gravity/Codex セッションがある場合は確認ダイアログ表示
 - **閉じたタブの復元**: `↺` ボタンから最近閉じたタブを復元
 - **Split view（左右2分割）**: タブを右クリック →「新しい分割ビューにタブを追加」、または Cmd+\ で分割トグル（Chromeのタブメニュー準拠）
   - 右クリックしたタブがアクティブタブの隣に表示される（アクティブタブ自身を右クリックした場合は隣のタブとペアに）
@@ -36,7 +38,7 @@ Claude Code / Gemini CLI のマルチセッション管理デスクトップア�
 - **セッション一覧**: 全タブのステータスをリアルタイム表示
   - 緑パルスドット: エージェント実行中
   - グレードット: アイドル状態
-  - "Thinking..." / ツール名: Claude/Gemini が実行中のアクションを表示
+  - "Thinking..." / ツール名: Claude/Gravity が実行中のアクションを表示
 - **タスク管理**: サイドバー下部にタスクリスト
   - テキスト入力で追加
   - チェックで完了
@@ -123,7 +125,7 @@ Agent の出力に `[[SEND: タブ名 :: 本文]]` が含まれると、メイ�
 2. Agent にプロトコルを教える。各 Agent の**グローバル指示ファイル**に以下のサンプルを追記する（指示ファイル名は Agent ごとに異なる）:
    - Claude Code → `~/.claude/CLAUDE.md`
    - Codex CLI → `~/.codex/AGENTS.md`（プロジェクトの `AGENTS.md` でも可）
-   - Gemini CLI → `~/.gemini/GEMINI.md`
+   - Antigravity CLI → `~/.gemini/GEMINI.md`
 
    ```markdown
    ## Agent Conductor タブ間連携

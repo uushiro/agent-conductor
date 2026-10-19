@@ -27,7 +27,7 @@ const PRESET_EDITORS = [
 ]
 
 export function SettingsModal({ onClose }: Props) {
-  const { theme, fontSize, editorCommand, customEditors, accentColor, customColors, defaultAgent, inputSendMode, inputSubmitMode, sidebarWidgets, resumeProjectDirs, updateSettings } = useSettings()
+  const { theme, fontSize, editorCommand, customEditors, accentColor, customColors, defaultAgent, gravityCommand, inputSendMode, inputSubmitMode, sidebarWidgets, resumeProjectDirs, updateSettings } = useSettings()
   const { lang, toggleLang } = useLang()
   const t = strings[lang]
   const [addingEditor, setAddingEditor] = useState(false)
@@ -188,7 +188,7 @@ export function SettingsModal({ onClose }: Props) {
           <div className="settings-row">
             <label className="settings-label">{t.defaultAgent}</label>
             <div className="settings-toggle-group">
-              {(['claude', 'gemini', 'codex'] as DefaultAgent[]).map((agent) => (
+              {(['claude', 'gravity', 'codex'] as DefaultAgent[]).map((agent) => (
                 <button
                   key={agent}
                   className={`settings-toggle-btn${defaultAgent === agent ? ' active' : ''}`}
@@ -217,6 +217,17 @@ export function SettingsModal({ onClose }: Props) {
                 </button>
               ))}
             </div>
+          </div>
+
+          <div className="settings-row">
+            <label className="settings-label">Gravity command</label>
+            <input
+              className="settings-input"
+              value={gravityCommand}
+              placeholder="agy"
+              onChange={(e) => updateSettings({ gravityCommand: e.target.value })}
+              onBlur={() => { if (!gravityCommand.trim()) updateSettings({ gravityCommand: 'agy' }) }}
+            />
           </div>
 
           <div className="settings-row">

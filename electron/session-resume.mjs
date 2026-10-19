@@ -1,6 +1,4 @@
-import path from 'node:path'
-
-export const SESSION_SCHEMA_VERSION = 4
+export const SESSION_SCHEMA_VERSION = 5
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export function exactClaudeSessionId(info) {
@@ -27,13 +25,15 @@ export function mergeRestoreSnapshot(original, liveByIndex, restoreComplete) {
   return { ...original, tabs: tabs.filter(Boolean) }
 }
 
-export function exactGeminiSessionFile(file, cwd, home) {
-  if (typeof file !== 'string' || !path.isAbsolute(file)) return null
-  const projectDir = path.basename(cwd) || 'home'
-  const root = path.join(home, '.gemini', 'tmp', projectDir, 'chats')
-  const relative = path.relative(root, file)
-  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || relative.includes(path.sep)) return null
-  return /^session-[a-z0-9_-]+\.json$/i.test(relative) ? file : null
+export function exactGravityConversationId(info) {
+  const id = info?.gravityConversationId || null
+  return typeof id === 'string' && UUID_RE.test(id) ? id : null
+}
+
+export function uniquePendingGravityTab(entries, cwd) {
+  const normalized = String(cwd || '')
+  const matches = [...entries].filter(([, pendingCwd]) => pendingCwd === normalized)
+  return matches.length === 1 ? matches[0][0] : null
 }
 
 export function shellQuote(value) {
@@ -52,7 +52,7 @@ export function consumeOsc7(previous, data) {
   return { sequences, tail: raw.slice(Math.max(lastEnd, raw.length - 2048)) }
 }
 
-export function savedResumeCommand(info, home) {
+export function savedResumeCommand(info, home, gravityCommand = 'agy') {
   if (info?.hadClaude) {
     const id = exactClaudeSessionId(info)
     if (!id) return { ok: false, reason: '保存されたClaudeの会話IDがありません。' }
@@ -64,10 +64,12 @@ export function savedResumeCommand(info, home) {
     if (!id) return { ok: false, reason: '保存されたCodexの会話IDがありません。' }
     return { ok: true, command: `codex resume ${id}\r`, agent: 'codex' }
   }
-  if (info?.hadGemini) {
-    const file = exactGeminiSessionFile(info.geminiSessionFile, info.cwd, home)
-    if (!file) return { ok: false, reason: '保存されたGeminiのセッションファイルがありません。' }
-    return { ok: true, command: `gemini --session-file ${shellQuote(file)}\r`, agent: 'gemini' }
+  if (info?.hadGravity) {
+    const id = exactGravityConversationId(info)
+    // Legacy Gemini CLI sessions are intentionally migrated to a fresh Gravity
+    // conversation: the two CLIs use incompatible session formats.
+    const command = typeof gravityCommand === 'string' && /^[a-z0-9_./~-]+$/i.test(gravityCommand) ? gravityCommand : 'agy'
+    return { ok: true, command: id ? `${command} --conversation ${id}\r` : `${command}\r`, agent: 'gravity' }
   }
   return { ok: true, command: null, agent: null }
 }

@@ -6,6 +6,11 @@ import { readFileSync } from 'fs'
 const { version } = JSON.parse(readFileSync('./package.json', 'utf-8'))
 
 export default defineConfig({
+  build: {
+    // esbuild minification corrupts xterm 6's requestMode enum initializer,
+    // which freezes the terminal as soon as Antigravity probes terminal modes.
+    minify: false,
+  },
   server: {
     port: 5173,
     strictPort: true,
