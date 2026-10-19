@@ -248,6 +248,10 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
       ? '\x1b[A'
       : e.key === 'ArrowDown'
       ? '\x1b[B'
+      : e.key === 'ArrowRight'
+      ? '\x1b[C'
+      : e.key === 'ArrowLeft'
+      ? '\x1b[D'
       : e.key === 'Enter'
       ? '\r'
       : null
@@ -302,7 +306,7 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
             <button
               type="button"
               className={`terminal-tui-menu-trigger${tuiMenuOpen ? ' terminal-tui-menu-trigger--open' : ''}`}
-              title="TUI操作（入力欄が空なら ↑ ↓ Enter をキーボードから操作できます）"
+              title="TUI操作（入力欄が空なら ↑ ↓ ← → Enter をキーボードから操作できます）"
               aria-label="TUI操作メニュー"
               aria-expanded={tuiMenuOpen}
               onClick={() => setTuiMenuOpen((open) => !open)}
@@ -322,10 +326,20 @@ export function FloatingInput({ activeTabId, visible, onClose, onHeightChange, o
                 >↓</button>
                 <button
                   type="button"
+                  title="ターミナルへ左矢印キーを送る"
+                  onClick={() => sendTuiKey('\x1b[D')}
+                >←</button>
+                <button
+                  type="button"
+                  title="ターミナルへ右矢印キーを送る"
+                  onClick={() => sendTuiKey('\x1b[C')}
+                >→</button>
+                <button
+                  type="button"
                   title="ターミナルへEnterキーを送る"
                   onClick={() => sendTuiKey('\r')}
                 >決定</button>
-                <span className="terminal-tui-menu-hint">空欄なら ↑ ↓ Enter</span>
+                <span className="terminal-tui-menu-hint">空欄なら ↑ ↓ ← → Enter</span>
               </div>
             )}
           </div>
