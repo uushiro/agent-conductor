@@ -5,7 +5,7 @@ import { useSettings } from '../contexts/SettingsContext'
 import { useLang, strings } from '../contexts/LangContext'
 
 export interface TerminalTabsHandle {
-  sendToNewTab: (prompt: string, agent: 'claude' | 'gemini' | 'codex') => void
+  sendToNewTab: (prompt: string, agent: 'claude' | 'gravity' | 'codex') => void
   resumeSession: (sessionId: string, agent: 'claude' | 'codex', cwd?: string, title?: string) => void
 }
 
@@ -48,7 +48,8 @@ interface ClosedEntry {
   cwd: string
   claudeSessionId: string | null
   codexSessionId: string | null
-  agent: 'claude' | 'gemini' | 'codex'
+  gravityConversationId: string | null
+  agent: 'claude' | 'gravity' | 'codex'
   closedAt: number
   model: string | null
 }
@@ -98,7 +99,8 @@ interface Props {
 }
 
 export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function TerminalTabs({ activeTabId, panes, splitPair, focusedPane, onActiveTabChange, onAddToSplit, onRemoveFromSplit, onSwapSplit, onCloseRightPane, onTabRemoved }, ref) {
-  const { fontSize, defaultAgent } = useSettings()
+  const { fontSize, defaultAgent, gravityCommand } = useSettings()
+  const gravityCli = /^[a-z0-9_./~-]+$/i.test(gravityCommand.trim()) ? gravityCommand.trim() : 'agy'
   const { lang } = useLang()
   const t = strings[lang]
   const [tabs, setTabs] = useState<Tab[]>([])
@@ -172,10 +174,10 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
           ? saved.claudeSessionId ?? undefined
           : saved.hadCodex
           ? saved.codexSessionId ?? undefined
-          : saved.hadGemini
-          ? saved.geminiSessionFile ?? undefined
+          : saved.hadGravity
+          ? saved.gravityConversationId ?? undefined
           : undefined
-        const pendingAgent = saved.hadCodex ? 'codex' : saved.hadGemini ? 'gemini' : saved.hadClaude ? 'claude' : undefined
+        const pendingAgent = saved.hadCodex ? 'codex' : saved.hadGravity ? 'gravity' : saved.hadClaude ? 'claude' : undefined
         const tabId = await window.electronAPI.createTerminal(
           saved.cwd,
           pendingSessionId,
@@ -187,8 +189,8 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         }
         if (handoff) {
           handoffRestores.push({ tabId, lineage: handoff })
-        } else if (saved.hadClaude || saved.hadGemini || saved.hadCodex) savedRestores.push(tabId)
-        const willResume = saved.hadClaude || saved.hadGemini || saved.hadCodex
+        } else if (saved.hadClaude || saved.hadGravity || saved.hadCodex) savedRestores.push(tabId)
+        const willResume = saved.hadClaude || saved.hadGravity || saved.hadCodex
         restored.push({
           id: tabId,
           issue: saved.issue,
@@ -415,7 +417,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     return () => document.removeEventListener('keydown', handler, true)
   }, [confirmClose])
 
-  const createTab = useCallback(async (agent: 'claude' | 'gemini' | 'codex' | 'terminal' = defaultAgent, initialPrompt?: string, model?: ClaudeModel) => {
+  const createTab = useCallback(async (agent: 'claude' | 'gravity' | 'codex' | 'terminal' = defaultAgent, initialPrompt?: string, model?: ClaudeModel) => {
     const tabId = await window.electronAPI.createTerminal()
     setTabs((prev) => [
       ...prev,
@@ -424,7 +426,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
     onActiveTabChange(tabId)
     if (agent !== 'terminal') {
       setTimeout(() => {
-        const cmd = agent === 'gemini' ? 'gemini\r' : agent === 'codex' ? 'codex\r' : model ? `claude --model ${model}\r` : 'claude\r'
+        const cmd = agent === 'gravity' ? `${gravityCli}\r` : agent === 'codex' ? 'codex\r' : model ? `claude --model ${model}\r` : 'claude\r'
         window.electronAPI.sendTerminalInput(tabId, cmd)
         if (initialPrompt) {
           // Wait for agent to initialize before sending the prompt
@@ -434,7 +436,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         }
       }, 1000)
     }
-  }, [onActiveTabChange, defaultAgent])
+  }, [onActiveTabChange, defaultAgent, gravityCli])
 
   // Open a new tab inside a fresh git worktree of the source tab's repo.
   // Branch name is optional — main generates a default (wt-YYYYMMDD-HHmmss) when empty.
@@ -460,7 +462,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
   }, [onActiveTabChange])
 
   useImperativeHandle(ref, () => ({
-    sendToNewTab: (prompt: string, agent: 'claude' | 'gemini' | 'codex') => {
+    sendToNewTab: (prompt: string, agent: 'claude' | 'gravity' | 'codex') => {
       createTab(agent, prompt)
     },
     resumeSession: async (sessionId: string, agent: 'claude' | 'codex', cwd?: string, title?: string) => {
@@ -522,11 +524,15 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
         window.electronAPI.removeClosedHistory(entry.claudeSessionId)
       } else if (entry.codexSessionId) {
         window.electronAPI.removeClosedHistory(entry.codexSessionId)
+      } else if (entry.gravityConversationId) {
+        window.electronAPI.removeClosedHistory(entry.gravityConversationId)
       }
-      const tabId = await window.electronAPI.createTerminal(
-        entry.cwd,
-        entry.claudeSessionId ?? undefined
-      )
+      const pendingSessionId = entry.agent === 'gravity'
+        ? entry.gravityConversationId ?? undefined
+        : entry.agent === 'codex'
+        ? entry.codexSessionId ?? undefined
+        : entry.claudeSessionId ?? undefined
+      const tabId = await window.electronAPI.createTerminal(entry.cwd, pendingSessionId, entry.agent)
       if (entry.issue) {
         await window.electronAPI.setTerminalIssue(tabId, entry.issue)
       }
@@ -538,15 +544,15 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
       setTimeout(() => {
         // entry.model is the explicit launch flag (main's launchModel), not the badge model.
         const modelFlag = entry.model ? ` --model ${entry.model}` : ''
-        const cmd = entry.agent === 'gemini'
-          ? 'gemini --resume latest\r'
+        const cmd = entry.agent === 'gravity'
+          ? entry.gravityConversationId ? `${gravityCli} --conversation ${entry.gravityConversationId}\r` : `${gravityCli}\r`
           : entry.agent === 'codex'
           ? codexResumeCmd(entry.codexSessionId)
           : entry.claudeSessionId ? `claude${modelFlag} --resume ${entry.claudeSessionId}\r` : `claude${modelFlag}\r`
         window.electronAPI.sendTerminalInput(tabId, cmd)
       }, 1000)
     },
-    [onActiveTabChange]
+    [onActiveTabChange, gravityCli]
   )
 
   const handleTabMouseDown = useCallback((e: React.MouseEvent, idx: number) => {
@@ -898,9 +904,9 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, Props>(function Termi
               +
             </button>
             {showAgentMenu && (() => {
-              const agentItems: Array<{ agent: 'claude' | 'gemini' | 'codex'; icon: string; label: string }> = [
+              const agentItems: Array<{ agent: 'claude' | 'gravity' | 'codex'; icon: string; label: string }> = [
                 { agent: 'claude', icon: '◆', label: 'Claude' },
-                { agent: 'gemini', icon: '◇', label: 'Gemini' },
+                { agent: 'gravity', icon: '◇', label: 'Gravity' },
                 { agent: 'codex', icon: '⬡', label: 'Codex' },
               ]
               const sorted = [

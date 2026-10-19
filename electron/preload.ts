@@ -23,7 +23,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('terminal:reset', listener)
   },
   // Terminal lifecycle
-  createTerminal: (cwd?: string, pendingSessionId?: string, pendingAgent?: 'claude' | 'codex' | 'gemini', restoreIndex?: number) =>
+  createTerminal: (cwd?: string, pendingSessionId?: string, pendingAgent?: 'claude' | 'codex' | 'gravity', restoreIndex?: number) =>
     ipcRenderer.invoke('terminal:create', cwd, pendingSessionId, pendingAgent, restoreIndex) as Promise<string>,
   createWorktreeTerminal: (tabId: string, branchName?: string) =>
     ipcRenderer.invoke('terminal:create-worktree', tabId, branchName) as Promise<
@@ -67,7 +67,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getTabHasClaude: (tabId: string) =>
     ipcRenderer.invoke('terminal:get-tab-has-claude', tabId) as Promise<boolean>,
   getClosedHistory: () =>
-    ipcRenderer.invoke('terminal:get-closed-history') as Promise<Array<{ issue: string; cwd: string; claudeSessionId: string | null; closedAt: number; model: string | null }>>,
+    ipcRenderer.invoke('terminal:get-closed-history') as Promise<Array<{ issue: string; cwd: string; claudeSessionId: string | null; codexSessionId: string | null; gravityConversationId: string | null; agent: 'claude' | 'gravity' | 'codex'; closedAt: number; model: string | null }>>,
   removeClosedHistory: (sessionId: string) => {
     ipcRenderer.send('terminal:remove-closed-history', sessionId)
   },

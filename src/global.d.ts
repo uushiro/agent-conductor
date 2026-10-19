@@ -9,7 +9,8 @@ export interface ClosedTabEntry {
   cwd: string
   claudeSessionId: string | null
   codexSessionId: string | null
-  agent: 'claude' | 'gemini' | 'codex'
+  gravityConversationId: string | null
+  agent: 'claude' | 'gravity' | 'codex'
   closedAt: number
   model: string | null
 }
@@ -55,7 +56,7 @@ export interface TabInfo {
 }
 
 export interface SavedSession {
-  tabs: Array<{ handoff?: unknown; issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null; hadGemini: boolean; geminiSessionFile?: string | null; hadCodex: boolean; codexSessionId: string | null; model: string | null }>
+  tabs: Array<{ handoff?: unknown; issue: string; cwd: string; hadClaude: boolean; claudeSessionId: string | null; hadGravity: boolean; gravityConversationId?: string | null; hadGemini?: boolean; geminiSessionFile?: string | null; hadCodex: boolean; codexSessionId: string | null; model: string | null }>
   activeIndex: number
 }
 
@@ -91,7 +92,7 @@ export interface ElectronAPI {
   getAgentSwitchContext: (tabId: string) => Promise<{ text: string; stats: { turnCount: number; omittedReceipts: number; truncated: boolean; droppedTurns: number; retainedUnknown: number }; ready: boolean; reason: string }>
   acknowledgeAgentSwitchRender: (tabId: string, renderToken: string) => void
   onTerminalReset: (callback: (tabId: string, data: string, renderToken?: string) => void) => () => void
-  createTerminal: (cwd?: string, pendingSessionId?: string, pendingAgent?: 'claude' | 'codex' | 'gemini', restoreIndex?: number) => Promise<string>
+  createTerminal: (cwd?: string, pendingSessionId?: string, pendingAgent?: 'claude' | 'codex' | 'gravity', restoreIndex?: number) => Promise<string>
   createWorktreeTerminal: (tabId: string, branchName?: string) => Promise<
     { ok: true; tabId: string; worktreePath: string; branch: string } | { ok: false; error: string }
   >

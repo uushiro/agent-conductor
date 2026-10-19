@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { consumeOsc7, exactClaudeSessionId, mergeRestoreSnapshot, savedResumeCommand, selectedIndex } from './session-resume.mjs'
+import { consumeOsc7, exactClaudeSessionId, mergeRestoreSnapshot, savedResumeCommand, selectedIndex, uniquePendingGravityTab } from './session-resume.mjs'
 
 const one = '11111111-1111-4111-8111-111111111111'
 const two = '22222222-2222-4222-8222-222222222222'
@@ -16,8 +16,19 @@ test('exact identity helpers never substitute a same-cwd latest session', () => 
 test('restore commands carry only exact saved identities', () => {
   assert.equal(savedResumeCommand({ hadClaude: true, claudeSessionId: one, launchModel: 'sonnet' }, '/home').command, `claude --model sonnet --resume ${one}\r`)
   assert.equal(savedResumeCommand({ hadCodex: true, codexSessionId: two }, '/home').command, `codex resume ${two}\r`)
-  const gemini = savedResumeCommand({ hadGemini: true, cwd: '/work/project', geminiSessionFile: '/home/.gemini/tmp/project/chats/session-abc_123.json' }, '/home')
-  assert.equal(gemini.command, "gemini --session-file '/home/.gemini/tmp/project/chats/session-abc_123.json'\r")
+  const gravity = savedResumeCommand({ hadGravity: true, cwd: '/work/project', gravityConversationId: '12345678-1234-1234-1234-123456789abc' }, '/home')
+  assert.equal(gravity.command, 'agy --conversation 12345678-1234-1234-1234-123456789abc\r')
+  const migratedGemini = savedResumeCommand({ hadGravity: true, cwd: '/work/project', gravityConversationId: null }, '/home')
+  assert.equal(migratedGemini.command, 'agy\r')
+  const guarded = savedResumeCommand({ hadGravity: true, gravityConversationId: one }, '/home', 'agy; echo unsafe')
+  assert.equal(guarded.command, `agy --conversation ${one}\r`)
+})
+
+test('Gravity identity binding fails closed for concurrent tabs in the same cwd', () => {
+  const pending = new Map([['tab-a', '/work/project'], ['tab-b', '/work/project'], ['tab-c', '/other']])
+  assert.equal(uniquePendingGravityTab(pending, '/work/project'), null)
+  pending.delete('tab-b')
+  assert.equal(uniquePendingGravityTab(pending, '/work/project'), 'tab-a')
 })
 
 test('all tabs and selected index survive restore-in-progress saves', () => {
