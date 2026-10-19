@@ -105,6 +105,7 @@ const tabLastInputAt = new Map<string, number>()
 const tabSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
 const tabGravitySessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
 const tabGravitySessionWatcherCwds = new Map<string, string>()
+const tabGravitySessionAmbiguous = new Set<string>()
 const tabCodexSessionWatchers = new Map<string, ReturnType<typeof setInterval>>()
 // tabId → timestamp until which [[SEND:]] detection is suppressed (resume replay window)
 const tabResumeCooldown = new Map<string, number>()
@@ -980,6 +981,19 @@ function getLastGravityConversationId(cwd: string): string | null {
 function startGravitySessionWatch(tabId: string, cwd: string) {
   stopGravitySessionWatch(tabId)
   const normalizedCwd = path.resolve(cwd)
+  // Keep ownership and ambiguity for the tab's lifetime, even after timeout or
+  // a successful observation. A later prompt must not reopen a collision race.
+  tabGravitySessionWatcherCwds.set(tabId, normalizedCwd)
+  const peers = [...tabGravitySessionWatcherCwds]
+    .filter(([, pendingCwd]) => pendingCwd === normalizedCwd)
+    .map(([pendingTabId]) => pendingTabId)
+  if (peers.length > 1) {
+    for (const peer of peers) {
+      tabGravitySessionAmbiguous.add(peer)
+      stopGravitySessionWatch(peer)
+    }
+  }
+  if (tabGravitySessionAmbiguous.has(tabId)) return
   const previousId = getLastGravityConversationId(normalizedCwd)
   const watcher = setInterval(() => {
     const id = getLastGravityConversationId(normalizedCwd)
@@ -990,7 +1004,10 @@ function startGravitySessionWatch(tabId: string, cwd: string) {
         .filter(([, pendingCwd]) => pendingCwd === normalizedCwd)
         .map(([pendingTabId]) => pendingTabId)
       console.warn(`[gravity-session] refused ambiguous same-cwd candidate for ${ambiguous.join(', ')} (${normalizedCwd})`)
-      for (const pendingTabId of ambiguous) stopGravitySessionWatch(pendingTabId)
+      for (const pendingTabId of ambiguous) {
+        tabGravitySessionAmbiguous.add(pendingTabId)
+        stopGravitySessionWatch(pendingTabId)
+      }
       return
     }
     const info = tabInfo.get(tabId)
@@ -1009,7 +1026,6 @@ function stopGravitySessionWatch(tabId: string) {
   const watcher = tabGravitySessionWatchers.get(tabId)
   if (watcher) clearInterval(watcher)
   tabGravitySessionWatchers.delete(tabId)
-  tabGravitySessionWatcherCwds.delete(tabId)
 }
 
 // --- Codex session helpers ---
@@ -1978,6 +1994,7 @@ function releaseHandoffRuntime(id: string) {
     timers.delete(id)
   }
   tabGravitySessionWatcherCwds.delete(id)
+  tabGravitySessionAmbiguous.delete(id)
   const resumeTimer = tabResumeWatch.get(id)
   if (resumeTimer) clearTimeout(resumeTimer)
   tabResumeWatch.delete(id)
@@ -2569,6 +2586,7 @@ function createWindow() {
     for (const w of tabGravitySessionWatchers.values()) clearInterval(w)
     tabGravitySessionWatchers.clear()
     tabGravitySessionWatcherCwds.clear()
+    tabGravitySessionAmbiguous.clear()
     for (const w of tabCodexSessionWatchers.values()) clearInterval(w)
     tabCodexSessionWatchers.clear()
     tabOrder.length = 0
@@ -2645,6 +2663,9 @@ function createWindow() {
     if (sw) { clearInterval(sw); tabSessionWatchers.delete(tabId) }
     const cw = tabCodexSessionWatchers.get(tabId)
     if (cw) { clearInterval(cw); tabCodexSessionWatchers.delete(tabId) }
+    stopGravitySessionWatch(tabId)
+    tabGravitySessionWatcherCwds.delete(tabId)
+    tabGravitySessionAmbiguous.delete(tabId)
     const idx = tabOrder.indexOf(tabId)
     if (idx !== -1) tabOrder.splice(idx, 1)
     const proc = ptyProcesses.get(tabId)
