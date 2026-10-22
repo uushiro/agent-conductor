@@ -2042,7 +2042,13 @@ async function readRuntimeHandoff(id: string) {
   if (runtime && result.text) runtime.transcriptSeen = true
   if (runtime?.initialReceipt) {
     const receipt = runtime.initialReceipt
-    const exactAck = result.lastAssistantText?.split(/\r?\n/).some(line => line.trim() === `AC_HANDOFF_READY:${receipt.token}`)
+    // Accept the receipt from any assistant turn since the handoff started, not only the
+    // last one: user-side Stop hooks can push the CLI into an extra follow-up turn after
+    // it has already emitted the exact token (observed 2026-10-22, 60s timeout otherwise).
+    const ackLine = `AC_HANDOFF_READY:${receipt.token}`
+    const hasAck = (text?: string) => Boolean(text?.split(/\r?\n/).some(line => line.trim() === ackLine))
+    const exactAck = hasAck(result.lastAssistantText)
+      || (result.turns ?? []).some((turn: any) => turn.role === 'assistant' && (turn.timestamp || 0) >= receipt.startedAt && hasAck(turn.text))
     const group = switchController.groups.get(switchController.owner(id))
     group?.context.registerReceipt(result, receipt.prompt, receipt.token)
     if (!result.ready || result.lastEventAt < receipt.startedAt || !exactAck) {
