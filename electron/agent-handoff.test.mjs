@@ -79,3 +79,26 @@ test('non-object JSON records fail closed instead of crashing the reader', async
     assert.equal((await readHandoffSession({ agent: 'claude', sessionId: claudeId, cwd, home: root })).ready, false);
   }
 });
+
+test('oversized transcripts are read as a head+tail window instead of being refused', async () => {
+  const root = await home(); const file = path.join(root, '.codex/sessions/2026/10/22', `rollout-2026-10-22T12-00-00-${codexId}.jsonl`);
+  const filler = 'x'.repeat(64 * 1024);
+  const rows = [
+    { type: 'session_meta', payload: { id: codexId, cwd, source: 'interactive' } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'first question' }], cwd, session_id: codexId } },
+  ];
+  // ~12 MiB of tool output pushes the file well past the 8 MiB single-read limit.
+  for (let i = 0; i < 190; i += 1) rows.push({ type: 'response_item', timestamp: i, payload: { type: 'function_call_output', output: filler } });
+  rows.push({ type: 'response_item', timestamp: 1000, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'latest question' }], cwd, session_id: codexId } });
+  rows.push({ type: 'response_item', timestamp: 1001, payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'latest answer' }] } });
+  rows.push({ type: 'event_msg', timestamp: 1002, payload: { type: 'task_complete' } });
+  await jsonl(file, rows);
+  const got = await readHandoffSession({ agent: 'codex', sessionId: codexId, cwd, home: root });
+  assert.equal(got.ready, true, got.reason); assert.equal(got.windowed, true);
+  assert.match(got.text, /latest question/); assert.match(got.text, /latest answer/);
+  assert.doesNotMatch(got.reason, /exceeds/);
+  // A mid-record cut must not surface as a malformed transcript; a mismatched tail identity still fails closed.
+  rows.push({ type: 'response_item', timestamp: 1003, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'x' }], cwd: '/elsewhere', session_id: codexId } });
+  await jsonl(file, rows);
+  assert.match((await readHandoffSession({ agent: 'codex', sessionId: codexId, cwd, home: root })).reason, /metadata/);
+});

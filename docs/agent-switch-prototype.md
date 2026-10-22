@@ -55,8 +55,10 @@ tab ID stays the same. Run this checklist manually before relying on the feature
   turn, no draft input, and no known running worker. Silence alone is insufficient.
   This does not inspect arbitrary background shell jobs or external processes.
 - Supports zsh/bash launch wrappers and the supported local JSONL transcript
-  layouts. Unknown/paginated layouts, missing IDs, ambiguous ownership, oversized
-  transcripts (>8 MiB), and exhausted Codex searches (2,000 files) fail closed.
+  layouts. Unknown/paginated layouts, missing IDs, ambiguous ownership, and
+  exhausted Codex searches (2,000 files) fail closed. Transcripts over 8 MiB are
+  read as a bounded window (512 KiB head for identity + the most recent ~7.5 MiB)
+  rather than refused, so long-running sessions stay transferable.
 - Transfers up to 30,000 characters of text (start + recent conversation), with
   explicit truncation/omission markers. It is not a semantic summary; middle
   decisions, images, reasoning and tool result bodies may be absent. Original
