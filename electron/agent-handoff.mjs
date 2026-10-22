@@ -3,6 +3,11 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 const MAX_BYTES = 8 * 1024 * 1024;
+// Long-lived sessions routinely exceed MAX_BYTES (tool output dominates). Instead of
+// refusing them, read a bounded window: the file head (session identity/metadata) plus
+// the most recent tail, dropping the partial lines at each cut.
+const HEAD_BYTES = 512 * 1024;
+const TAIL_BYTES = MAX_BYTES - HEAD_BYTES;
 const MAX_CHARS = 30_000;
 const MAX_CODEX_DEPTH = 5;
 const MAX_CODEX_FILES = 2_000;
@@ -174,13 +179,29 @@ export async function readHandoffSession({ agent, sessionId, cwd, home }) {
   let handle;
   try { handle = await fs.open(sourcePath, 'r'); } catch { return failed({ agent, sessionId, cwd, path: sourcePath, reason: 'session could not be read' }); }
   let raw;
+  let windowed = false;
   try {
     const before = await handle.stat();
-    if (!before.isFile() || before.size > MAX_BYTES) return failed({ agent, sessionId, cwd, path: sourcePath, reason: !before.isFile() ? 'session path is not a file' : 'session exceeds read limit' });
-    const buffer = Buffer.alloc(MAX_BYTES + 1);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    if (bytesRead > MAX_BYTES) return failed({ agent, sessionId, cwd, path: sourcePath, reason: 'session exceeds read limit' });
-    raw = buffer.toString('utf8', 0, bytesRead);
+    if (!before.isFile()) return failed({ agent, sessionId, cwd, path: sourcePath, reason: 'session path is not a file' });
+    if (before.size <= MAX_BYTES) {
+      const buffer = Buffer.alloc(MAX_BYTES + 1);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      raw = buffer.toString('utf8', 0, Math.min(bytesRead, MAX_BYTES));
+    } else {
+      windowed = true;
+      const head = Buffer.alloc(HEAD_BYTES);
+      const tail = Buffer.alloc(TAIL_BYTES);
+      const [{ bytesRead: headRead }, { bytesRead: tailRead }] = await Promise.all([
+        handle.read(head, 0, HEAD_BYTES, 0),
+        handle.read(tail, 0, TAIL_BYTES, before.size - TAIL_BYTES),
+      ]);
+      const headText = head.toString('utf8', 0, headRead);
+      const tailText = tail.toString('utf8', 0, tailRead);
+      // Keep only complete lines: the head ends mid-record, the tail starts mid-record.
+      const headCut = headText.lastIndexOf('\n');
+      const tailCut = tailText.indexOf('\n');
+      raw = `${headCut >= 0 ? headText.slice(0, headCut) : ''}\n${tailCut >= 0 ? tailText.slice(tailCut + 1) : ''}`;
+    }
   } catch { return failed({ agent, sessionId, cwd, path: sourcePath, reason: 'session could not be read' }); }
   finally { await handle.close(); }
   const records = [];
@@ -205,7 +226,7 @@ export async function readHandoffSession({ agent, sessionId, cwd, home }) {
     if (cwds.some((value) => value !== cwd) || ids.some((value) => value !== sessionId)) return failed({ agent, sessionId, cwd, path: sourcePath, reason: 'transcript metadata does not match requested session' });
   }
   const parsed = agent === 'claude' ? parseClaude(records) : parseCodex(records);
-  return { sessionId, agent, cwd, path: sourcePath, fingerprint: createHash('sha256').update(raw).digest('hex'), ...parsed };
+  return { sessionId, agent, cwd, path: sourcePath, fingerprint: createHash('sha256').update(raw).digest('hex'), windowed, ...parsed };
 }
 
 /** Build an inert context-receipt prompt; transcript text is always data between literal boundaries. */
