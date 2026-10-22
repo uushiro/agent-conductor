@@ -1884,6 +1884,9 @@ function spawnPty(cwd?: string, handoff?: { agent: ResumableAgent; prompt: strin
 
 // The public tab ID stays stable. Parked runtimes are omitted from tabOrder and
 // cannot receive user input or queued agent messages until explicitly activated.
+// How long a restored CLI gets to acknowledge its receipt before an idle, verified
+// saved conversation is accepted as the handoff source without it.
+const HANDOFF_RECEIPT_GRACE_MS = 20_000
 const handoffRuntimes = new Map<string, { agent: ResumableAgent; token: string; startedAt: number; exited: boolean; output: string; transcriptSeen: boolean; initialReceipt?: { prompt: string; token: string; startedAt: number } }>()
 const handoffScreens = new Map<string, string>()
 
@@ -2051,12 +2054,26 @@ async function readRuntimeHandoff(id: string) {
       || (result.turns ?? []).some((turn: any) => turn.role === 'assistant' && (turn.timestamp || 0) >= receipt.startedAt && hasAck(turn.text))
     const group = switchController.groups.get(switchController.owner(id))
     group?.context.registerReceipt(result, receipt.prompt, receipt.token)
-    if (!result.ready || result.lastEventAt < receipt.startedAt || !exactAck) {
-      return { ...result, cwd: info.cwd, ready: false, errorCode: undefined,
-        reason: '復元した会話の起動と引き継ぎ確認を待っています。初回設定が表示された場合は完了してください。' }
+    // A restored CLI that is rate-limited, logged out or otherwise unable to answer
+    // never acknowledges the receipt. The saved conversation was verified complete
+    // before the restore, so after a grace period treat it as an idle handoff source
+    // as long as the transcript shows no activity since the restore. That is exactly
+    // the situation a handoff exists for (observed 2026-10-22: Codex usage limit).
+    const receiptStale = Date.now() - receipt.startedAt > HANDOFF_RECEIPT_GRACE_MS
+    const untouchedSinceRestore = result.lastEventAt < receipt.startedAt && result.ready
+    if (!exactAck && receiptStale && untouchedSinceRestore) {
+      console.warn(`[handoff] ${id}: restored ${runtime.agent} never acknowledged the receipt; using the verified saved conversation as-is`)
+      delete runtime.initialReceipt
+    } else {
+      if (!result.ready || result.lastEventAt < receipt.startedAt || !exactAck) {
+        return { ...result, cwd: info.cwd, ready: false, errorCode: undefined,
+          reason: receiptStale
+            ? '復元した会話の引き継ぎ確認がまだありません。切り替え元のCLIが応答できない場合は、会話が完了状態なら間もなく引き継げます。初回設定が表示された場合は完了してください。'
+            : '復元した会話の起動と引き継ぎ確認を待っています。初回設定が表示された場合は完了してください。' }
+      }
+      group?.context.merge(result)
+      delete runtime.initialReceipt
     }
-    group?.context.merge(result)
-    delete runtime.initialReceipt
   }
   const ready = result.ready && result.lastEventAt >= (tabLastInputAt.get(id) || 0)
   const unsupported = /malformed|unrecognized|invalid session|metadata|ambiguous|subagent|escapes|exceeds|limit reached/.test(result.reason)
