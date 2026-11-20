@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, type CSSProperties } from 'react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 
 interface TerminalProps {
@@ -63,6 +64,7 @@ export function Terminal({ tabId, visible, focused, showFocusIndicator = false, 
   useEffect(() => {
     if (!containerRef.current) return
 
+    const openLink = (_event: MouseEvent, url: string) => window.electronAPI.openExternal(url)
     const term = new XTerm({
       theme: {
         background: '#0d1117',
@@ -94,10 +96,12 @@ export function Terminal({ tabId, visible, focused, showFocusIndicator = false, 
       scrollback: 10000,
       allowProposedApi: true,
       macOptionClickForcesSelection: true,
+      linkHandler: { activate: openLink },
     })
 
     const fitAddon = new FitAddon()
     term.loadAddon(fitAddon)
+    term.loadAddon(new WebLinksAddon(openLink))
 
     term.open(containerRef.current)
     fitAddon.fit()

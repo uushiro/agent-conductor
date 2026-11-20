@@ -3092,8 +3092,15 @@ function createWindow() {
     try { fs.writeFileSync(SETTINGS_FILE, data) } catch {}
   })
 
-  ipcMain.on('shell:open-url', (_event, url: string) => {
-    shell.openExternal(url)
+  ipcMain.on('shell:open-url', async (_event, url: unknown) => {
+    if (typeof url !== 'string') return
+    const link = URL.canParse(url) ? new URL(url) : null
+    if (!link || (link.protocol !== 'https:' && link.protocol !== 'http:')) return
+    try {
+      await shell.openExternal(link.href)
+    } catch (error) {
+      console.error('Failed to open external link:', error)
+    }
   })
 
   // Resume sessions: merged list of Claude sessions (~/.claude/projects/) and
