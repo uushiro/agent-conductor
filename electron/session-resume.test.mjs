@@ -18,8 +18,11 @@ test('restore commands carry only exact saved identities', () => {
   assert.equal(savedResumeCommand({ hadCodex: true, codexSessionId: two }, '/home').command, `codex resume ${two}\r`)
   const gravity = savedResumeCommand({ hadGravity: true, cwd: '/work/project', gravityConversationId: '12345678-1234-1234-1234-123456789abc' }, '/home')
   assert.equal(gravity.command, 'agy --conversation 12345678-1234-1234-1234-123456789abc\r')
-  const migratedGemini = savedResumeCommand({ hadGravity: true, cwd: '/work/project', gravityConversationId: null }, '/home')
-  assert.equal(migratedGemini.command, 'agy\r')
+  for (const gravityConversationId of [null, 'invalid-id']) {
+    assert.deepEqual(savedResumeCommand({ hadGravity: true, gravityConversationId }, '/home'), {
+      ok: false, reason: '保存されたGravityの会話IDがありません。'
+    })
+  }
   const guarded = savedResumeCommand({ hadGravity: true, gravityConversationId: one }, '/home', 'agy; echo unsafe')
   assert.equal(guarded.command, `agy --conversation ${one}\r`)
 })

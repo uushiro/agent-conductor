@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -49,6 +49,35 @@ test('Codex accepts the real rollout filename and requires task_complete after t
   assert.match((await readHandoffSession({ agent: 'codex', sessionId: codexId, cwd, home: root })).reason, /aborted/);
   await jsonl(path.join(root, '.codex/sessions/2026/10/05', `rollout-later-${codexId}.jsonl`), []);
   assert.match((await readHandoffSession({ agent: 'codex', sessionId: codexId, cwd, home: root })).reason, /ambiguous/);
+});
+
+test('Codex searches the newest 300 logs and rejects duplicates within that window', async (t) => {
+  const root = await home();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const newer = path.join(root, '.codex/sessions/2026/11/25');
+  await mkdir(newer, { recursive: true });
+  await Promise.all(Array.from({ length: 299 }, (_, index) => (
+    writeFile(path.join(newer, `rollout-unrelated-${index}.jsonl`), '')
+  )));
+  const recent = path.join(root, '.codex/sessions/2026/11/24', `rollout-recent-${codexId}.jsonl`);
+  await jsonl(recent, [
+    { type: 'session_meta', payload: { id: codexId, cwd, source: 'cli' } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: 'hello' } },
+    { type: 'event_msg', payload: { type: 'task_complete' } },
+  ]);
+  const request = { agent: 'codex', sessionId: codexId, cwd, home: root };
+  await jsonl(path.join(root, '.codex/sessions/2026/11/23', `rollout-old-${codexId}.jsonl`), []);
+  const result = await readHandoffSession(request);
+  assert.equal(result.ready, true);
+  assert.equal(result.path, recent);
+
+  await jsonl(path.join(root, '.codex/sessions/2026/11/26', `rollout-extra.jsonl`), []);
+  assert.equal((await readHandoffSession(request)).reason, 'session not found');
+
+  await rm(path.join(newer, 'rollout-unrelated-0.jsonl'));
+  await jsonl(path.join(root, '.codex/sessions/2026/11/26', `rollout-duplicate-${codexId}.jsonl`), []);
+  await rm(path.join(root, '.codex/sessions/2026/11/26', 'rollout-extra.jsonl'));
+  assert.equal((await readHandoffSession(request)).reason, 'ambiguous Codex session');
 });
 
 test('Claude activity after end_turn and Codex subagent metadata fail closed', async () => {

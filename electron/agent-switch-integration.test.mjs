@@ -276,7 +276,12 @@ test('main IPC keeps logical tab, title, sidebar, persistence and input routing 
     emit('terminal:input', delayed, 'delayed first prompt\r')
     assert.equal([...intervals.values()].filter(timer => timer.ms === 1000).length, idleWatchers + 1)
     emit('terminal:close', delayed)
-    emit('terminal:close', root)
+    await invoke('terminal:set-issue', root, 'Renamed after startup')
+    const newTab = await invoke('terminal:create', project)
+    emit('session:set-active-tab', newTab)
+    const reloaded = await invoke('session:load')
+    assert.ok(reloaded.tabs.some(tab => tab.issue === 'Renamed after startup'))
+    assert.equal(reloaded.activeIndex, reloaded.tabs.length - 1)
     assert.equal(ptys.every(p => p.killed), true)
   } finally {
     for (const timer of timeouts) clearTimeout(timer)

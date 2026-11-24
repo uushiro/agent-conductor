@@ -10,7 +10,7 @@ const HEAD_BYTES = 512 * 1024;
 const TAIL_BYTES = MAX_BYTES - HEAD_BYTES;
 const MAX_CHARS = 30_000;
 const MAX_CODEX_DEPTH = 5;
-const MAX_CODEX_FILES = 2_000;
+const MAX_RECENT_CODEX_LOGS = 300;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function failed({ agent, sessionId, cwd = '', reason, path: sourcePath = '' }) {
@@ -23,23 +23,27 @@ function claudeProjectDir(cwd) {
 
 async function codexCandidates(root, sessionId) {
   const found = [];
-  let seen = 0;
+  const rolloutName = new RegExp(`^rollout-.+-${sessionId}\\.jsonl$`, 'i');
+  let inspected = 0;
+  // Codex sorts chronologically by YYYY/MM/DD and the timestamp in the
+  // rollout filename. Traverse both in descending order.
   async function walk(dir, depth) {
-    if (depth > MAX_CODEX_DEPTH || found.length > 1 || seen >= MAX_CODEX_FILES) return;
+    if (depth > MAX_CODEX_DEPTH || found.length > 1 || inspected >= MAX_RECENT_CODEX_LOGS) return;
     let entries;
     try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+    entries.sort((a, b) => b.name.localeCompare(a.name));
     for (const entry of entries) {
-      if (found.length > 1 || seen >= MAX_CODEX_FILES) return;
+      if (found.length > 1 || inspected >= MAX_RECENT_CODEX_LOGS) return;
       const item = path.join(dir, entry.name);
       if (entry.isDirectory()) await walk(item, depth + 1);
-      else if (entry.isFile()) {
-        seen += 1;
-        if (entry.name === `${sessionId}.jsonl` || new RegExp(`^rollout-.+-${sessionId}\\.jsonl$`, 'i').test(entry.name)) found.push(item);
+      else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+        inspected += 1;
+        if (entry.name === `${sessionId}.jsonl` || rolloutName.test(entry.name)) found.push(item);
       }
     }
   }
   await walk(root, 0);
-  return { found, exhausted: seen >= MAX_CODEX_FILES };
+  return found;
 }
 
 function textParts(content, role) {
@@ -166,10 +170,9 @@ export async function readHandoffSession({ agent, sessionId, cwd, home }) {
   let sourcePath;
   if (agent === 'claude') sourcePath = path.join(home, '.claude', 'projects', claudeProjectDir(cwd), `${sessionId}.jsonl`);
   else {
-    const result = await codexCandidates(path.join(home, '.codex', 'sessions'), sessionId);
-    if (result.exhausted) return failed({ agent, sessionId, cwd, reason: 'Codex session search limit reached' });
-    if (result.found.length !== 1) return failed({ agent, sessionId, cwd, reason: result.found.length ? 'ambiguous Codex session' : 'session not found' });
-    sourcePath = result.found[0];
+    const candidates = await codexCandidates(path.join(home, '.codex', 'sessions'), sessionId);
+    if (candidates.length !== 1) return failed({ agent, sessionId, cwd, reason: candidates.length ? 'ambiguous Codex session' : 'session not found' });
+    sourcePath = candidates[0];
   }
   const transcriptRoot = path.join(home, agent === 'claude' ? '.claude' : '.codex', agent === 'claude' ? 'projects' : 'sessions');
   let realRoot, realPath;

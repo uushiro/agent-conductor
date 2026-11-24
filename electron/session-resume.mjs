@@ -66,10 +66,9 @@ export function savedResumeCommand(info, home, gravityCommand = 'agy') {
   }
   if (info?.hadGravity) {
     const id = exactGravityConversationId(info)
-    // Legacy Gemini CLI sessions are intentionally migrated to a fresh Gravity
-    // conversation: the two CLIs use incompatible session formats.
+    if (!id) return { ok: false, reason: '保存されたGravityの会話IDがありません。' }
     const command = typeof gravityCommand === 'string' && /^[a-z0-9_./~-]+$/i.test(gravityCommand) ? gravityCommand : 'agy'
-    return { ok: true, command: id ? `${command} --conversation ${id}\r` : `${command}\r`, agent: 'gravity' }
+    return { ok: true, command: `${command} --conversation ${id}\r`, agent: 'gravity' }
   }
   return { ok: true, command: null, agent: null }
 }
